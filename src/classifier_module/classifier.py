@@ -3,9 +3,26 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from document_processor.config import settings
 from document_processor.models import Document, StageResult
 
 from classifier_module.rules import ROUTE_TO_TYPE, TYPE_KEYWORDS
+
+_ALL_TYPES = [t for t, _ in TYPE_KEYWORDS] + list(ROUTE_TO_TYPE.values()) + ["unknown"]
+
+# LLM client created once; gracefully absent when ANTHROPIC_API_KEY is not set
+_llm: object = None
+
+
+def _get_llm():
+    global _llm
+    if _llm is None:
+        from llm_client import LLMClient
+        _llm = LLMClient(
+            model=settings.llm_model,
+            max_input_chars=settings.llm_max_input_chars,
+        )
+    return _llm
 
 
 class ClassifierModule:
@@ -15,6 +32,15 @@ class ClassifierModule:
         t = time.monotonic()
         route = context.get("router", {}).get("route", "generic")
         doc_type, confidence, method = self._classify(document, route)
+
+        if (
+            settings.llm_enabled
+            and confidence < settings.llm_confidence_threshold
+        ):
+            doc_type, confidence, method = await self._llm_classify(
+                document, route, doc_type, confidence, method
+            )
+
         return StageResult(
             module=self.name,
             status="success",
@@ -25,8 +51,11 @@ class ClassifierModule:
     async def health_check(self) -> bool:
         return True
 
+    # ------------------------------------------------------------------
+    # Heuristic classification
+    # ------------------------------------------------------------------
+
     def _classify(self, document: Document, route: str) -> tuple[str, float, str]:
-        # Non-text routes are unambiguous from the route alone
         base = ROUTE_TO_TYPE.get(route)
         if base:
             return base, 0.90, "route"
@@ -36,17 +65,14 @@ class ClassifierModule:
         if text:
             doc_type, score = self._keyword_score(text)
             if score > 0:
-                # Each matching keyword adds ~0.08 confidence, capped at 0.92
                 return doc_type, min(0.44 + score * 0.08, 0.92), "keyword"
 
-        # Filename hint
         if document.filename:
             stem = Path(document.filename).stem.lower()
             for doc_type, keywords in TYPE_KEYWORDS:
                 if any(kw.strip() in stem for kw in keywords):
                     return doc_type, 0.55, "filename"
 
-        # Generic fallback based on route
         if route in ("pdf", "word"):
             return "document", 0.35, "route"
 
@@ -65,3 +91,40 @@ class ClassifierModule:
             if score > best_score:
                 best_type, best_score = doc_type, score
         return best_type, best_score
+
+    # ------------------------------------------------------------------
+    # LLM fallback
+    # ------------------------------------------------------------------
+
+    async def _llm_classify(
+        self,
+        document: Document,
+        route: str,
+        fallback_type: str,
+        fallback_confidence: float,
+        fallback_method: str,
+    ) -> tuple[str, float, str]:
+        llm = _get_llm()
+        if not llm.available:
+            return fallback_type, fallback_confidence, fallback_method
+
+        image_bytes: bytes | None = None
+        image_media_type = "image/jpeg"
+        if route == "image" and settings.llm_vision_enabled:
+            image_bytes = document.content
+            if document.mimetype:
+                image_media_type = document.mimetype
+
+        text = self._readable_text(document)
+
+        result = await llm.classify(
+            text=text,
+            known_types=_ALL_TYPES,
+            image_bytes=image_bytes,
+            image_media_type=image_media_type,
+        )
+        if result is None:
+            return fallback_type, fallback_confidence, fallback_method
+
+        doc_type, confidence = result
+        return doc_type, confidence, "llm"

@@ -9,5 +9,12 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_file: str = "logs/document_processor.jsonl"
 
+    # LLM settings
+    llm_model: str = "claude-haiku-4-5"
+    llm_enabled: bool = True
+    llm_confidence_threshold: float = 0.50
+    llm_max_input_chars: int = 4_000
+    llm_vision_enabled: bool = True
+
 
 settings = Settings()

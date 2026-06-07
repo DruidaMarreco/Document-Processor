@@ -9,6 +9,7 @@ dependencies = [
     "pydantic-settings>=2.2",
     "loguru>=0.7",
     "python-multipart>=0.0.9",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +26,7 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = [
     "src/document_processor",
+    "src/llm_client",
     "src/router_module",
     "src/classifier_module",
     "src/extractor_module",
