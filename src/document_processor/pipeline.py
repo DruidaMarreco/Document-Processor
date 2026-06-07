@@ -1,14 +1,29 @@
 import time
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from loguru import logger
 
 from document_processor.models import Document, PipelineResult, StageResult
 from document_processor.modules.base import Module
 
+Listener = Callable[[Document, StageResult], Coroutine[Any, Any, None]]
+
 
 class Pipeline:
-    def __init__(self, stages: list[Module]) -> None:
+    def __init__(self, stages: list[Module], listeners: list[Listener] | None = None) -> None:
         self.stages = stages
+        self._listeners: list[Listener] = listeners or []
+
+    def add_listener(self, listener: Listener) -> None:
+        self._listeners.append(listener)
+
+    async def _notify(self, document: Document, result: StageResult) -> None:
+        for listener in self._listeners:
+            try:
+                await listener(document, result)
+            except Exception as exc:
+                logger.warning("pipeline.listener.error", error=str(exc))
 
     async def run(self, document: Document) -> PipelineResult:
         start = time.monotonic()
@@ -46,12 +61,13 @@ class Pipeline:
                 duration_ms=round(result.duration_ms, 2),
                 errors=result.errors or None,
             )
+            await self._notify(document, result)
 
             if failed:
                 for remaining in self.stages[len(stage_results):]:
-                    stage_results.append(
-                        StageResult(module=remaining.name, status="skipped", duration_ms=0.0)
-                    )
+                    skipped = StageResult(module=remaining.name, status="skipped", duration_ms=0.0)
+                    stage_results.append(skipped)
+                    await self._notify(document, skipped)
                 break
 
         total_ms = (time.monotonic() - start) * 1000

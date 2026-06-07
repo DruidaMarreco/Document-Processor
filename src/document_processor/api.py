@@ -2,9 +2,11 @@ from uuid import UUID
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from document_processor import registry
 from document_processor.models import Document, PipelineResult
+from monitoring_module.api import app as _monitoring_app
 
 app = FastAPI(title="Document Processor", version="0.1.0")
 
@@ -15,7 +17,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.mount("/monitoring", _monitoring_app)
+
 _results: dict[UUID, PipelineResult] = {}
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse("/monitoring")
 
 
 @app.get("/health")

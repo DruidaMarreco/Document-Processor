@@ -1,7 +1,15 @@
 """
 Module registry.
 
-Swap a stub for the real package once that module repo is implemented:
+Status:
+  [x] router      — real implementation (router_module)
+  [ ] classifier  — stub
+  [ ] extractor   — stub
+  [ ] refiner     — stub
+  [ ] validator   — stub
+  [ ] generator   — stub
+
+To replace a stub once a module repo is implemented:
 
     # Before:
     from document_processor.modules.stubs import ClassifierModuleStub
@@ -18,19 +26,22 @@ from document_processor.modules.stubs import (
     ExtractorModuleStub,
     GeneratorModuleStub,
     RefinerModuleStub,
-    RouterModuleStub,
     ValidatorModuleStub,
 )
 from document_processor.pipeline import Pipeline
+from monitoring_module import MonitoringModule
+from router_module import RouterModule
 
 
 def build_pipeline() -> Pipeline:
     stages: list[Module] = [
-        RouterModuleStub(),
+        RouterModule(),
         ClassifierModuleStub(),
         ExtractorModuleStub(),
         RefinerModuleStub(),
         ValidatorModuleStub(),
         GeneratorModuleStub(),
     ]
-    return Pipeline(stages)
+    pipeline = Pipeline(stages)
+    pipeline.add_listener(MonitoringModule().on_event)
+    return pipeline
