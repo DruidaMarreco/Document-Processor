@@ -57,3 +57,15 @@ class ApiKeyInfo(BaseModel):
     prefix: str  # first 8 chars, safe to display
     name: str
     created_at: datetime
+
+
+class JobRecord(BaseModel):
+    job_id: UUID = Field(default_factory=uuid4)
+    status: Literal["queued", "processing", "done", "failed"]
+    filename: str | None = None
+    mimetype: str = "application/octet-stream"
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    result_id: UUID | None = None
+    error: str | None = None

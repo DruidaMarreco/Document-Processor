@@ -10,7 +10,7 @@ from uuid import UUID
 
 import aiosqlite
 
-from document_processor.models import ApiKey, ApiKeyInfo, Document, PipelineResult, WebhookConfig
+from document_processor.models import ApiKey, ApiKeyInfo, Document, JobRecord, PipelineResult, WebhookConfig
 
 _DB_PATH = Path("data/results.db")
 
@@ -50,6 +50,19 @@ _DDL_API_KEYS = """
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_JOBS = """
+    CREATE TABLE IF NOT EXISTS jobs (
+        job_id       TEXT PRIMARY KEY,
+        status       TEXT NOT NULL DEFAULT 'queued',
+        filename     TEXT,
+        mimetype     TEXT,
+        created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        started_at   TEXT,
+        completed_at TEXT,
+        result_id    TEXT,
+        error        TEXT
+    )
+"""
 # Columns added after initial schema — migrated at startup
 _MIGRATION_COLUMNS = [
     ("doc_type",        "TEXT"),
@@ -79,6 +92,7 @@ async def init_db() -> None:
         await db.execute(_DDL_DOCUMENTS)
         await db.execute(_DDL_WEBHOOKS)
         await db.execute(_DDL_API_KEYS)
+        await db.execute(_DDL_JOBS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -414,3 +428,98 @@ async def delete_api_key_by_prefix(prefix: str) -> bool:
         )
         await db.commit()
     return (cursor.rowcount or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Async job queue persistence
+# ---------------------------------------------------------------------------
+
+def _row_to_job(row: tuple) -> JobRecord:
+    job_id, status, filename, mimetype, created_at, started_at, completed_at, result_id, error = row
+    return JobRecord(
+        job_id=job_id,
+        status=status,
+        filename=filename,
+        mimetype=mimetype or "application/octet-stream",
+        created_at=created_at,
+        started_at=started_at,
+        completed_at=completed_at,
+        result_id=result_id,
+        error=error,
+    )
+
+
+async def create_job(job: JobRecord, document: Document) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_JOBS)
+        await db.execute(_DDL_DOCUMENTS)
+        await db.execute(
+            """INSERT INTO jobs (job_id, status, filename, mimetype)
+               VALUES (?, ?, ?, ?)""",
+            (str(job.job_id), job.status, job.filename, job.mimetype),
+        )
+        await db.execute(
+            """INSERT OR REPLACE INTO documents (id, filename, mimetype, content)
+               VALUES (?, ?, ?, ?)""",
+            (str(job.job_id), document.filename, document.mimetype, document.content),
+        )
+        await db.commit()
+
+
+async def get_job(job_id: UUID) -> JobRecord | None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_JOBS)
+        await db.commit()
+        async with db.execute(
+            "SELECT job_id, status, filename, mimetype, created_at, started_at, "
+            "completed_at, result_id, error FROM jobs WHERE job_id = ?",
+            (str(job_id),),
+        ) as cursor:
+            row = await cursor.fetchone()
+    return _row_to_job(row) if row else None
+
+
+async def update_job(
+    job_id: UUID,
+    status: str,
+    started_at: str | None = None,
+    completed_at: str | None = None,
+    result_id: UUID | None = None,
+    error: str | None = None,
+) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_JOBS)
+        await db.execute(
+            """UPDATE jobs SET status=?, started_at=COALESCE(?, started_at),
+               completed_at=COALESCE(?, completed_at),
+               result_id=COALESCE(?, result_id),
+               error=COALESCE(?, error)
+               WHERE job_id=?""",
+            (status, started_at, completed_at,
+             str(result_id) if result_id else None,
+             error, str(job_id)),
+        )
+        await db.commit()
+
+
+async def list_jobs(limit: int = 50, offset: int = 0) -> list[JobRecord]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_JOBS)
+        await db.commit()
+        async with db.execute(
+            "SELECT job_id, status, filename, mimetype, created_at, started_at, "
+            "completed_at, result_id, error FROM jobs "
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [_row_to_job(r) for r in rows]
+
+
+async def get_job_document(job_id: UUID) -> Document | None:
+    """Retrieve document bytes stored when the job was queued."""
+    return await get_document(job_id)

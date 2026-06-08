@@ -17,7 +17,8 @@ from slowapi.util import get_remote_address
 
 from document_processor import registry, storage
 from document_processor.auth import require_api_key
-from document_processor.models import ApiKey, ApiKeyInfo, Document, PipelineResult, WebhookConfig
+from document_processor.job_worker import run_worker
+from document_processor.models import ApiKey, ApiKeyInfo, Document, JobRecord, PipelineResult, WebhookConfig
 from document_processor.webhook_delivery import fire_webhooks
 from monitoring_module.api import app as _monitoring_app
 
@@ -25,11 +26,19 @@ _UPLOAD_HTML = (Path(__file__).parent / "upload.html").read_text()
 
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
+_job_queue: asyncio.Queue = asyncio.Queue()
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await storage.init_db()
+    worker = asyncio.create_task(run_worker(_job_queue))
     yield
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title="Document Processor", version="0.1.0", lifespan=lifespan)
@@ -261,6 +270,54 @@ async def delete_result(document_id: UUID):
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
     await storage.delete_result(document_id)
+
+
+# ---------------------------------------------------------------------------
+# Async job queue endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/jobs", response_model=JobRecord, status_code=202,
+          dependencies=[Depends(require_api_key)])
+@limiter.limit("30/minute")
+async def submit_job(request: Request, file: UploadFile = File(...)):
+    """Submit a document for background processing. Poll GET /jobs/{job_id} for status."""
+    content = await file.read()
+    document = Document(
+        filename=file.filename,
+        mimetype=file.content_type or "application/octet-stream",
+        content=content,
+    )
+    job = JobRecord(
+        status="queued",
+        filename=file.filename,
+        mimetype=file.content_type or "application/octet-stream",
+    )
+    # Use job_id as document id so get_job_document can reuse get_document
+    document = Document(
+        id=job.job_id,
+        filename=file.filename,
+        mimetype=file.content_type or "application/octet-stream",
+        content=content,
+    )
+    await storage.create_job(job, document)
+    await _job_queue.put(job.job_id)
+    return job
+
+
+@app.get("/jobs", response_model=list[JobRecord], dependencies=[Depends(require_api_key)])
+async def list_jobs(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    return await storage.list_jobs(limit=limit, offset=offset)
+
+
+@app.get("/jobs/{job_id}", response_model=JobRecord, dependencies=[Depends(require_api_key)])
+async def get_job(job_id: UUID):
+    job = await storage.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 # ---------------------------------------------------------------------------
