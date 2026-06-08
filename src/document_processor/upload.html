@@ -1,1 +1,1411 @@
-<!DOCTYPE html><html><body><p>Loading...</p></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Document Processor — Upload</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0f1117;
+      --surface: #1a1d27;
+      --border:  #2a2d3a;
+      --text:    #e2e8f0;
+      --muted:   #64748b;
+      --accent:  #6366f1;
+      --green:   #22c55e;
+      --red:     #ef4444;
+      --yellow:  #eab308;
+      --blue:    #3b82f6;
+
+      --font: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Menlo', monospace;
+      --radius: 6px;
+      --transition: 180ms ease;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    button {
+      font-family: var(--font);
+      font-size: 13px;
+      cursor: pointer;
+      border: none;
+      outline: none;
+      border-radius: var(--radius);
+      transition: opacity var(--transition), background var(--transition);
+    }
+    button:hover { opacity: 0.85; }
+    button:active { opacity: 0.7; }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* ── Header ───────────────────────────────────────────────────────── */
+    #header {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 48px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      gap: 16px;
+      z-index: 100;
+    }
+
+    .header-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      animation: pulse-dot 2s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+    @keyframes pulse-dot {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.6); }
+      50%       { box-shadow: 0 0 0 5px rgba(34,197,94,0); }
+    }
+
+    .header-title {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: var(--text);
+      flex: 1;
+    }
+
+    .header-nav {
+      display: flex;
+      gap: 4px;
+    }
+    .nav-link {
+      padding: 5px 12px;
+      border-radius: var(--radius);
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      transition: color var(--transition), background var(--transition);
+    }
+    .nav-link:hover { color: var(--text); background: var(--border); text-decoration: none; }
+    .nav-link.active { color: var(--accent); background: rgba(99,102,241,0.12); }
+
+    /* ── Main layout ──────────────────────────────────────────────────── */
+    #main {
+      margin-top: 48px;
+      min-height: calc(100vh - 48px);
+      display: flex;
+      justify-content: center;
+      padding: 40px 20px 60px;
+    }
+
+    #content {
+      width: 100%;
+      max-width: 860px;
+    }
+
+    /* ── Drop zone ────────────────────────────────────────────────────── */
+    #drop-zone {
+      height: 200px;
+      border: 2px dashed var(--border);
+      border-radius: 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      cursor: pointer;
+      transition: border-color var(--transition), background var(--transition);
+      position: relative;
+      outline: none;
+    }
+    #drop-zone:hover,
+    #drop-zone:focus {
+      border-color: var(--accent);
+      background: rgba(99,102,241,0.04);
+    }
+    #drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(99,102,241,0.08);
+      box-shadow: 0 0 0 4px rgba(99,102,241,0.15);
+    }
+
+    .drop-icon {
+      font-size: 32px;
+      line-height: 1;
+      color: var(--muted);
+      transition: color var(--transition);
+    }
+    #drop-zone:hover .drop-icon,
+    #drop-zone.drag-over .drop-icon { color: var(--accent); }
+
+    .drop-primary {
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .drop-secondary {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    #file-input { display: none; }
+
+    .batch-link-row {
+      margin-top: 14px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .batch-link-row a { color: var(--accent); }
+
+    /* ── File info bar ────────────────────────────────────────────────── */
+    #file-info {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 20px;
+    }
+    .file-icon { font-size: 20px; }
+    .file-name {
+      flex: 1;
+      color: var(--text);
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-size { color: var(--muted); flex-shrink: 0; }
+    .cancel-btn {
+      padding: 3px 10px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      border-radius: var(--radius);
+      font-size: 11px;
+    }
+    .cancel-btn:hover { color: var(--red); border-color: var(--red); opacity: 1; }
+
+    /* ── Pipeline stages ──────────────────────────────────────────────── */
+    #pipeline-section { display: none; }
+
+    .pipeline-label {
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+
+    #pipeline-row {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .stage-box {
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+      padding: 10px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      min-width: 88px;
+      transition: border-color var(--transition), background var(--transition),
+                  box-shadow var(--transition);
+    }
+
+    .stage-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: background var(--transition), box-shadow var(--transition);
+    }
+    .stage-name {
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      transition: color var(--transition);
+    }
+    .stage-dur {
+      font-size: 10px;
+      color: var(--muted);
+      min-height: 14px;
+      transition: color var(--transition);
+    }
+
+    /* Stage states */
+    .stage-box.running {
+      border-color: rgba(234,179,8,0.5);
+      background: rgba(234,179,8,0.05);
+    }
+    .stage-box.running .stage-dot {
+      background: var(--yellow);
+      animation: pulse-stage 1s ease-in-out infinite;
+    }
+    .stage-box.running .stage-name { color: var(--yellow); }
+
+    .stage-box.success {
+      border-color: rgba(34,197,94,0.4);
+      background: rgba(34,197,94,0.05);
+    }
+    .stage-box.success .stage-dot { background: var(--green); }
+    .stage-box.success .stage-name { color: var(--green); }
+    .stage-box.success .stage-dur  { color: var(--green); }
+
+    .stage-box.error {
+      border-color: rgba(239,68,68,0.4);
+      background: rgba(239,68,68,0.05);
+    }
+    .stage-box.error .stage-dot { background: var(--red); }
+    .stage-box.error .stage-name { color: var(--red); }
+
+    .stage-box.skipped {
+      border-color: var(--border);
+      opacity: 0.5;
+    }
+
+    @keyframes pulse-stage {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(234,179,8,0.5); }
+      50%       { box-shadow: 0 0 0 4px rgba(234,179,8,0); }
+    }
+
+    .stage-arrow {
+      color: var(--border);
+      font-size: 16px;
+      flex-shrink: 0;
+      padding: 0 2px;
+      line-height: 1;
+      margin-bottom: 12px;
+    }
+
+    .pipeline-status {
+      margin-top: 14px;
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 18px;
+    }
+
+    /* ── Error banner ─────────────────────────────────────────────────── */
+    #error-banner {
+      display: none;
+      margin-top: 16px;
+      padding: 12px 16px;
+      background: rgba(239,68,68,0.08);
+      border: 1px solid rgba(239,68,68,0.3);
+      border-radius: var(--radius);
+      color: var(--red);
+      font-size: 12px;
+    }
+
+    /* ── Results section ──────────────────────────────────────────────── */
+    #results-section { display: none; margin-top: 24px; }
+
+    /* Summary card */
+    .summary-card {
+      padding: 16px 18px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 9px;
+      border-radius: 100px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .badge-type    { background: rgba(99,102,241,0.15); color: var(--accent); border: 1px solid rgba(99,102,241,0.3); }
+    .badge-route   { background: rgba(59,130,246,0.12); color: var(--blue);   border: 1px solid rgba(59,130,246,0.3); }
+    .badge-valid   { background: rgba(34,197,94,0.12);  color: var(--green);  border: 1px solid rgba(34,197,94,0.3); }
+    .badge-invalid { background: rgba(239,68,68,0.12);  color: var(--red);    border: 1px solid rgba(239,68,68,0.3); }
+    .badge-warn    { background: rgba(234,179,8,0.12);  color: var(--yellow); border: 1px solid rgba(234,179,8,0.3); }
+
+    .confidence-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+      min-width: 160px;
+    }
+    .confidence-label { font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .confidence-bar-outer {
+      flex: 1;
+      height: 5px;
+      background: var(--border);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .confidence-bar-inner {
+      height: 100%;
+      border-radius: 3px;
+      background: var(--accent);
+      transition: width 600ms cubic-bezier(0.4,0,0.2,1);
+    }
+    .confidence-pct { font-size: 11px; color: var(--text); min-width: 32px; text-align: right; }
+
+    .total-time {
+      font-size: 11px;
+      color: var(--muted);
+      margin-left: auto;
+    }
+
+    /* Tabs */
+    .tab-bar {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+    .tab-btn {
+      padding: 8px 16px;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      border-radius: 0;
+      transition: color var(--transition), border-color var(--transition);
+      margin-bottom: -1px;
+    }
+    .tab-btn:hover { color: var(--text); opacity: 1; }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* Summary tab */
+    .summary-text {
+      padding: 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      line-height: 1.7;
+      font-size: 13px;
+      white-space: pre-wrap;
+    }
+    .empty-text {
+      color: var(--muted);
+      font-style: italic;
+      padding: 16px;
+      text-align: center;
+    }
+
+    /* Fields tab */
+    .fields-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .fields-table th,
+    .fields-table td {
+      padding: 8px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .fields-table th {
+      color: var(--muted);
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      background: var(--surface);
+    }
+    .fields-table td { color: var(--text); }
+    .fields-table tr:last-child td { border-bottom: none; }
+    .field-key { color: var(--accent); font-size: 11px; }
+    .field-nested { padding-left: 28px !important; }
+    .field-nested .field-key { color: var(--blue); }
+    .field-val-obj { color: var(--muted); font-style: italic; }
+
+    /* Validation tab */
+    .val-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .violation-list,
+    .warning-list { list-style: none; }
+    .violation-list li,
+    .warning-list li {
+      padding: 7px 12px;
+      border-radius: var(--radius);
+      margin-bottom: 6px;
+      font-size: 12px;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .violation-list li {
+      background: rgba(239,68,68,0.07);
+      border: 1px solid rgba(239,68,68,0.2);
+      color: var(--text);
+    }
+    .warning-list li {
+      background: rgba(234,179,8,0.07);
+      border: 1px solid rgba(234,179,8,0.2);
+      color: var(--text);
+    }
+    .list-icon { flex-shrink: 0; margin-top: 1px; }
+    .section-sub {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin: 14px 0 8px;
+    }
+
+    /* Raw JSON tab */
+    .raw-pre {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      overflow-x: auto;
+      font-size: 11px;
+      line-height: 1.7;
+      color: var(--text);
+      white-space: pre;
+      tab-size: 2;
+    }
+
+    /* Reset button */
+    .reset-row {
+      margin-top: 24px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .reset-btn {
+      padding: 8px 18px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+
+    /* ── Batch mode ───────────────────────────────────────────────────── */
+    #batch-section { display: none; margin-top: 20px; }
+
+    .batch-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .batch-title {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .batch-process-btn {
+      padding: 6px 16px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .batch-file-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+    .batch-file-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .batch-file-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .batch-file-size { color: var(--muted); flex-shrink: 0; }
+    .batch-file-status { font-size: 11px; flex-shrink: 0; color: var(--muted); }
+
+    /* Spinner */
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Batch results table */
+    .batch-results-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 16px;
+    }
+    .batch-results-table th {
+      text-align: left;
+      padding: 8px 12px;
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+    .batch-results-table td {
+      padding: 8px 12px;
+      font-size: 12px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      vertical-align: middle;
+    }
+    .batch-results-table tr:last-child td { border-bottom: none; }
+
+    /* Section spacing */
+    .section-gap { margin-top: 24px; }
+
+    /* Utility */
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────────────────── -->
+<header id="header">
+  <div class="header-dot"></div>
+  <span class="header-title">Document Processor</span>
+  <nav class="header-nav">
+    <a href="/upload" class="nav-link active" id="nav-upload">Upload</a>
+    <a href="#" class="nav-link" id="nav-batch">Batch</a>
+    <a href="/monitoring" class="nav-link">Monitor &#8594;</a>
+  </nav>
+</header>
+
+<!-- ── Main ────────────────────────────────────────────────────────────── -->
+<main id="main">
+  <div id="content">
+
+    <!-- Drop zone (always visible as upload target) -->
+    <div
+      id="drop-zone"
+      tabindex="0"
+      role="button"
+      aria-label="Upload document — click or drag and drop a file here"
+    >
+      <div class="drop-icon">&#8593;</div>
+      <div class="drop-primary">Drop any document here &middot; or click to browse</div>
+      <div class="drop-secondary">PDF &middot; DOCX &middot; TXT &middot; CSV &middot; XLSX &middot; images and more</div>
+      <input type="file" id="file-input" accept="*/*" multiple />
+    </div>
+
+    <div class="batch-link-row" id="batch-link-row">
+      Or <a href="#" id="batch-link">upload multiple files for batch processing</a>
+    </div>
+
+    <!-- ── Single-file processing ──────────────────────────────────────── -->
+    <div class="section-gap">
+
+      <!-- File info bar -->
+      <div id="file-info">
+        <span class="file-icon" id="file-icon">&#128196;</span>
+        <span class="file-name" id="file-name"></span>
+        <span class="file-size" id="file-size"></span>
+        <button class="cancel-btn" id="cancel-btn">&#x2715; Cancel</button>
+      </div>
+
+      <!-- Pipeline progress -->
+      <div id="pipeline-section">
+        <div class="pipeline-label">Pipeline</div>
+        <div id="pipeline-row">
+          <!-- Stage boxes injected by JS -->
+        </div>
+        <div class="pipeline-status" id="pipeline-status">Initialising&#8230;</div>
+      </div>
+
+      <!-- Error banner -->
+      <div id="error-banner"></div>
+
+    </div>
+
+    <!-- ── Results ─────────────────────────────────────────────────────── -->
+    <div id="results-section">
+
+      <!-- Summary card -->
+      <div class="summary-card" id="summary-card">
+        <span class="badge badge-type"  id="res-doc-type">&#8212;</span>
+        <span class="badge badge-route" id="res-route">&#8212;</span>
+        <div class="confidence-wrap">
+          <span class="confidence-label">confidence</span>
+          <div class="confidence-bar-outer">
+            <div class="confidence-bar-inner" id="res-conf-bar" style="width:0%"></div>
+          </div>
+          <span class="confidence-pct" id="res-conf-pct">&#8212;</span>
+        </div>
+        <span id="res-valid-badge" class="badge">&#8212;</span>
+        <span class="total-time" id="res-total-time"></span>
+      </div>
+
+      <!-- Tabs -->
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="tab-summary">Summary</button>
+        <button class="tab-btn" data-tab="tab-fields">Fields</button>
+        <button class="tab-btn" data-tab="tab-validation">Validation</button>
+        <button class="tab-btn" data-tab="tab-raw">Raw JSON</button>
+      </div>
+
+      <div class="tab-panel active" id="tab-summary"></div>
+      <div class="tab-panel"        id="tab-fields"></div>
+      <div class="tab-panel"        id="tab-validation"></div>
+      <div class="tab-panel"        id="tab-raw"></div>
+
+      <div class="reset-row">
+        <button class="reset-btn" id="reset-btn">&#8635; Process another file</button>
+      </div>
+    </div>
+
+    <!-- ── Batch section ──────────────────────────────────────────────── -->
+    <div id="batch-section">
+      <div class="batch-header">
+        <span class="batch-title">Batch Upload</span>
+        <button class="batch-process-btn" id="batch-process-btn" disabled>Process 0 files</button>
+      </div>
+      <div class="batch-file-list" id="batch-file-list"></div>
+      <div id="batch-spinner" class="hidden" style="text-align:center;padding:20px;">
+        <span class="spinner"></span>
+        <span style="color:var(--muted);margin-left:10px;">Processing batch&#8230;</span>
+      </div>
+      <div id="batch-results"></div>
+    </div>
+
+  </div><!-- /#content -->
+</main>
+
+<script>
+'use strict';
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Constants
+═══════════════════════════════════════════════════════════════════════════ */
+const STAGES = ['router', 'classifier', 'extractor', 'refiner', 'validator', 'generator'];
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DOM references
+═══════════════════════════════════════════════════════════════════════════ */
+const $ = id => document.getElementById(id);
+
+const dropZone         = $('drop-zone');
+const fileInput        = $('file-input');
+const batchLinkRow     = $('batch-link-row');
+const fileInfo         = $('file-info');
+const fileIconEl       = $('file-icon');
+const fileNameEl       = $('file-name');
+const fileSizeEl       = $('file-size');
+const cancelBtn        = $('cancel-btn');
+const pipelineSection  = $('pipeline-section');
+const pipelineRow      = $('pipeline-row');
+const pipelineStatus   = $('pipeline-status');
+const errorBanner      = $('error-banner');
+const resultsSection   = $('results-section');
+const batchSection     = $('batch-section');
+const batchFileList    = $('batch-file-list');
+const batchProcessBtn  = $('batch-process-btn');
+const batchSpinner     = $('batch-spinner');
+const batchResults     = $('batch-results');
+const resetBtn         = $('reset-btn');
+const navBatch         = $('nav-batch');
+const batchLinkEl      = $('batch-link');
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   State
+═══════════════════════════════════════════════════════════════════════════ */
+let appMode    = 'idle';   // 'idle' | 'processing' | 'done' | 'batch'
+let batchFiles = [];
+let abortCtrl  = null;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Utility helpers
+═══════════════════════════════════════════════════════════════════════════ */
+function formatBytes(bytes) {
+  if (!bytes) return '0 B';
+  const units = ['B','KB','MB','GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
+}
+
+function formatMs(ms) {
+  if (ms == null) return '';
+  return ms < 1000 ? ms.toFixed(0) + 'ms' : (ms / 1000).toFixed(2) + 's';
+}
+
+function fileTypeIcon(name) {
+  if (!name) return '📄';
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const map = {
+    pdf:'📋', docx:'📝', doc:'📝', txt:'📃',
+    csv:'📊', xlsx:'📊', xls:'📊',
+    png:'🖼', jpg:'🖼', jpeg:'🖼', gif:'🖼', webp:'🖼', svg:'🖼',
+    json:'📐', xml:'📐', html:'🌐', zip:'📦', tar:'📦', gz:'📦',
+    mp4:'🎬', mov:'🎬', mp3:'🎵',
+  };
+  return map[ext] || '📄';
+}
+
+function esc(str) {
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function showError(msg) {
+  errorBanner.textContent = '⚠ ' + msg;
+  errorBanner.style.display = 'block';
+}
+function hideError() { errorBanner.style.display = 'none'; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Pipeline stage rendering
+═══════════════════════════════════════════════════════════════════════════ */
+function buildPipelineRow() {
+  pipelineRow.innerHTML = '';
+  STAGES.forEach((name, i) => {
+    const box = document.createElement('div');
+    box.className = 'stage-box';
+    box.id = 'stage-' + name;
+    box.innerHTML =
+      '<div class="stage-dot"></div>' +
+      '<div class="stage-name">' + esc(name) + '</div>' +
+      '<div class="stage-dur" id="dur-' + name + '"></div>';
+    pipelineRow.appendChild(box);
+
+    if (i < STAGES.length - 1) {
+      const arrow = document.createElement('div');
+      arrow.className = 'stage-arrow';
+      arrow.textContent = '→';
+      pipelineRow.appendChild(arrow);
+    }
+  });
+}
+
+function setStageState(module, state, durationMs) {
+  const box = $('stage-' + module);
+  if (!box) return;
+  // state: '' | 'running' | 'success' | 'error' | 'skipped'
+  box.className = 'stage-box' + (state ? ' ' + state : '');
+  if (durationMs != null) {
+    const dur = $('dur-' + module);
+    if (dur) dur.textContent = formatMs(durationMs);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   App mode transitions
+═══════════════════════════════════════════════════════════════════════════ */
+function resetToIdle() {
+  if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; }
+  appMode = 'idle';
+
+  dropZone.style.display            = '';
+  batchLinkRow.style.display        = '';
+  fileInfo.style.display            = 'none';
+  pipelineSection.style.display     = 'none';
+  resultsSection.style.display      = 'none';
+  batchSection.style.display        = 'none';
+  cancelBtn.style.display           = '';
+
+  hideError();
+  fileInput.value = '';
+  batchFiles = [];
+
+  setNavActive('upload');
+}
+
+function enterBatchMode() {
+  appMode = 'batch';
+
+  dropZone.style.display        = '';
+  batchLinkRow.style.display    = 'none';
+  fileInfo.style.display        = 'none';
+  pipelineSection.style.display = 'none';
+  resultsSection.style.display  = 'none';
+  batchSection.style.display    = 'block';
+  batchSpinner.classList.add('hidden');
+  batchResults.innerHTML        = '';
+
+  hideError();
+  setNavActive('batch');
+}
+
+function setNavActive(page) {
+  document.querySelectorAll('.nav-link').forEach(l => l.classList.remove('active'));
+  if (page === 'batch') {
+    navBatch.classList.add('active');
+  } else {
+    $('nav-upload').classList.add('active');
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Batch file list rendering
+═══════════════════════════════════════════════════════════════════════════ */
+function renderBatchList() {
+  batchFileList.innerHTML = '';
+  batchFiles.forEach((f, i) => {
+    const item = document.createElement('div');
+    item.className = 'batch-file-item';
+    item.id = 'bfile-' + i;
+    item.innerHTML =
+      '<span>' + fileTypeIcon(f.name) + '</span>' +
+      '<span class="batch-file-name">' + esc(f.name) + '</span>' +
+      '<span class="batch-file-size">' + esc(formatBytes(f.size)) + '</span>' +
+      '<span class="batch-file-status" id="bstatus-' + i + '">queued</span>';
+    batchFileList.appendChild(item);
+  });
+  const n = batchFiles.length;
+  batchProcessBtn.textContent = 'Process ' + n + ' file' + (n !== 1 ? 's' : '');
+  batchProcessBtn.disabled = (n === 0);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   File dispatch
+═══════════════════════════════════════════════════════════════════════════ */
+function handleFiles(fileList) {
+  if (!fileList || fileList.length === 0) return;
+  hideError();
+
+  const files = Array.from(fileList);
+
+  if (appMode === 'batch' || files.length > 1) {
+    // Merge into batch
+    const existing = new Set(batchFiles.map(f => f.name + f.size));
+    files.forEach(f => {
+      if (!existing.has(f.name + f.size)) batchFiles.push(f);
+    });
+    if (appMode !== 'batch') enterBatchMode();
+    renderBatchList();
+    return;
+  }
+
+  startSingleProcess(files[0]);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Single-file: streaming upload via /process/stream
+═══════════════════════════════════════════════════════════════════════════ */
+async function startSingleProcess(file) {
+  appMode = 'processing';
+
+  // File info bar
+  fileInfo.style.display    = 'flex';
+  fileIconEl.textContent    = fileTypeIcon(file.name);
+  fileNameEl.textContent    = file.name;
+  fileSizeEl.textContent    = formatBytes(file.size);
+  cancelBtn.style.display   = '';
+
+  // Pipeline
+  buildPipelineRow();
+  pipelineSection.style.display   = 'block';
+  resultsSection.style.display    = 'none';
+  batchSection.style.display      = 'none';
+  batchLinkRow.style.display      = 'none';
+  pipelineStatus.textContent      = 'Connecting…';
+  hideError();
+
+  STAGES.forEach(s => setStageState(s, '', null));
+
+  const formData = new FormData();
+  formData.append('file', file);
+  abortCtrl = new AbortController();
+
+  try {
+    const resp = await fetch('/process/stream', {
+      method: 'POST',
+      body: formData,
+      signal: abortCtrl.signal,
+    });
+
+    if (!resp.ok) {
+      // /process/stream may not exist — fall back gracefully
+      if (resp.status === 404 || resp.status === 405) {
+        await fallbackProcess(file);
+        return;
+      }
+      const text = await resp.text().catch(() => resp.statusText);
+      throw new Error('Server error ' + resp.status + ': ' + text);
+    }
+
+    await consumeSSE(resp.body);
+
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    // Network error or non-SSE response — try the sync /process endpoint
+    try {
+      await fallbackProcess(file);
+    } catch (fallbackErr) {
+      showError(fallbackErr.message || 'Upload failed');
+      // Mark any still-running stage as error
+      STAGES.forEach(s => {
+        const box = $('stage-' + s);
+        if (box && box.classList.contains('running')) setStageState(s, 'error', null);
+      });
+      pipelineStatus.textContent = 'Failed.';
+    }
+  }
+}
+
+/* ── Fallback: POST /process (synchronous JSON response) ────────────────── */
+async function fallbackProcess(file) {
+  pipelineStatus.textContent = 'Processing…';
+
+  // Animate stages while waiting for the synchronous response
+  let stageIdx = 0;
+  const tickInterval = setInterval(() => {
+    if (stageIdx > 0) setStageState(STAGES[stageIdx - 1], 'success', null);
+    if (stageIdx < STAGES.length) {
+      setStageState(STAGES[stageIdx], 'running', null);
+      pipelineStatus.textContent =
+        'Processing stage ' + (stageIdx + 1) + ' of ' + STAGES.length + '…';
+      stageIdx++;
+    }
+  }, 350);
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  let resp;
+  try {
+    resp = await fetch('/process', {
+      method: 'POST',
+      body: formData,
+      signal: abortCtrl ? abortCtrl.signal : undefined,
+    });
+  } finally {
+    clearInterval(tickInterval);
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => resp.statusText);
+    throw new Error('Server error ' + resp.status + ': ' + text);
+  }
+
+  const result = await resp.json();
+
+  // Reconcile stage states from actual result
+  if (result.stages && result.stages.length > 0) {
+    STAGES.forEach(name => {
+      const stage = result.stages.find(s => s.module === name);
+      if (stage) {
+        const state = stage.status === 'success' ? 'success'
+                    : stage.status === 'error'   ? 'error'
+                    : 'skipped';
+        setStageState(name, state, stage.duration_ms ?? null);
+      }
+    });
+  } else {
+    STAGES.forEach(s => setStageState(s, 'success', null));
+  }
+
+  pipelineStatus.textContent = 'Done in ' + formatMs(result.total_duration_ms) + '.';
+  renderResults(result);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SSE stream consumer
+═══════════════════════════════════════════════════════════════════════════ */
+async function consumeSSE(body) {
+  const reader  = body.getReader();
+  const decoder = new TextDecoder();
+  let   buf     = '';
+  let   stagesDone = 0;
+
+  const processBlock = block => {
+    if (!block.trim()) return;
+
+    // Collect all "data: " lines in the block
+    let jsonStr = '';
+    for (const line of block.split('\n')) {
+      if (line.startsWith('data: ')) jsonStr += line.slice(6);
+    }
+    if (!jsonStr) return;
+
+    let ev;
+    try { ev = JSON.parse(jsonStr); } catch { return; }
+
+    if (ev.type === 'stage') {
+      const rawStatus = ev.status;
+
+      if (rawStatus === 'running') {
+        // Mark previous stage done if it was still running
+        if (stagesDone > 0) {
+          const prevName = STAGES[stagesDone - 1];
+          const prevBox  = $('stage-' + prevName);
+          if (prevBox && prevBox.classList.contains('running')) {
+            setStageState(prevName, 'success', null);
+          }
+        }
+        setStageState(ev.module, 'running', null);
+        stagesDone++;
+        const idx = STAGES.indexOf(ev.module);
+        pipelineStatus.textContent =
+          'Processing stage ' + (idx + 1) + ' of ' + STAGES.length + ' — ' + ev.module + '…';
+
+      } else {
+        const uiState = rawStatus === 'success' ? 'success'
+                      : rawStatus === 'error'   ? 'error'
+                      : 'skipped';
+        setStageState(ev.module, uiState, ev.duration_ms ?? null);
+        if (rawStatus === 'error') {
+          pipelineStatus.textContent = 'Error in ' + ev.module + '.';
+        }
+      }
+
+    } else if (ev.type === 'done') {
+      // Ensure all stages are resolved
+      STAGES.forEach(s => {
+        const box = $('stage-' + s);
+        if (box && box.classList.contains('running')) setStageState(s, 'success', null);
+      });
+      pipelineStatus.textContent = 'Done in ' + formatMs(ev.total_duration_ms) + '.';
+      renderResults(ev);
+    }
+  };
+
+  // Read loop
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buf += decoder.decode(value, { stream: true });
+    const blocks = buf.split('\n\n');
+    buf = blocks.pop(); // keep incomplete trailing block
+    blocks.forEach(processBlock);
+  }
+
+  // Flush remainder
+  if (buf.trim()) {
+    buf.split('\n\n').forEach(processBlock);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Results rendering
+═══════════════════════════════════════════════════════════════════════════ */
+function renderResults(result) {
+  appMode = 'done';
+  resultsSection.style.display = 'block';
+  cancelBtn.style.display      = 'none';
+
+  const output = result.output || {};
+
+  // ── Summary card ────────────────────────────────────────────────────
+  $('res-doc-type').textContent = output.doc_type || result.doc_type || '—';
+  $('res-route').textContent    = output.route    || result.route    || '—';
+
+  const rawConf = output.confidence ?? result.confidence;
+  const confNum = parseFloat(rawConf);
+  const confPct = isNaN(confNum) ? 0 : (confNum <= 1 ? confNum * 100 : confNum);
+  $('res-conf-bar').style.width   = confPct.toFixed(1) + '%';
+  $('res-conf-pct').textContent   = confPct.toFixed(0) + '%';
+
+  const isValid     = output.valid ?? (result.validation && result.validation.valid);
+  const validBadge  = $('res-valid-badge');
+  if (isValid === true) {
+    validBadge.className   = 'badge badge-valid';
+    validBadge.textContent = '✓ Valid';
+  } else if (isValid === false) {
+    validBadge.className   = 'badge badge-invalid';
+    validBadge.textContent = '✗ Invalid';
+  } else {
+    validBadge.className   = 'badge badge-warn';
+    validBadge.textContent = '— Unknown';
+  }
+
+  $('res-total-time').textContent =
+    result.total_duration_ms != null ? '⏱ ' + formatMs(result.total_duration_ms) : '';
+
+  // ── Tab: Summary ─────────────────────────────────────────────────────
+  const summaryStr = output.summary || result.summary || '';
+  $('tab-summary').innerHTML = summaryStr
+    ? '<div class="summary-text">' + esc(summaryStr) + '</div>'
+    : '<div class="empty-text">No summary available for this document.</div>';
+
+  // ── Tab: Fields ───────────────────────────────────────────────────────
+  const fields = output.fields || result.fields || {};
+  $('tab-fields').innerHTML = Object.keys(fields).length > 0
+    ? buildFieldsTable(fields)
+    : '<div class="empty-text">No fields were extracted.</div>';
+
+  // ── Tab: Validation ───────────────────────────────────────────────────
+  const validation = output.validation || result.validation || {};
+  const violations = Array.isArray(validation.violations) ? validation.violations : [];
+  const warnings   = Array.isArray(validation.warnings)   ? validation.warnings   : [];
+
+  let valHtml = '<div class="val-header">';
+  if (isValid === true) {
+    valHtml += '<span class="badge badge-valid">✓ Valid</span>';
+  } else if (isValid === false) {
+    valHtml += '<span class="badge badge-invalid">✗ Invalid &mdash; '
+             + violations.length + ' violation' + (violations.length !== 1 ? 's' : '') + '</span>';
+  } else {
+    valHtml += '<span class="badge badge-warn">Unknown</span>';
+  }
+  valHtml += '</div>';
+
+  if (violations.length > 0) {
+    valHtml += '<div class="section-sub">Violations</div><ul class="violation-list">';
+    violations.forEach(v => {
+      const text = typeof v === 'string' ? v : JSON.stringify(v);
+      valHtml += '<li><span class="list-icon">✗</span><span>' + esc(text) + '</span></li>';
+    });
+    valHtml += '</ul>';
+  }
+
+  if (warnings.length > 0) {
+    valHtml += '<div class="section-sub">Warnings</div><ul class="warning-list">';
+    warnings.forEach(w => {
+      const text = typeof w === 'string' ? w : JSON.stringify(w);
+      valHtml += '<li><span class="list-icon">⚠</span><span>' + esc(text) + '</span></li>';
+    });
+    valHtml += '</ul>';
+  }
+
+  if (violations.length === 0 && warnings.length === 0) {
+    valHtml += '<div class="empty-text">No violations or warnings.</div>';
+  }
+
+  $('tab-validation').innerHTML = valHtml;
+
+  // ── Tab: Raw JSON ─────────────────────────────────────────────────────
+  $('tab-raw').innerHTML = '<pre class="raw-pre">' + esc(JSON.stringify(result, null, 2)) + '</pre>';
+
+  // Activate Summary tab
+  activateTab('tab-summary');
+}
+
+/* ── Field table builder ─────────────────────────────────────────────────── */
+function buildFieldsTable(fields) {
+  let rows = '';
+
+  function addRows(obj, depth) {
+    for (const [k, v] of Object.entries(obj)) {
+      const indent = depth > 0 ? ' style="padding-left:' + (12 + depth * 16) + 'px"' : '';
+      const keyClass = depth === 0 ? 'field-key' : 'field-key" style="color:var(--blue)';
+      if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
+        rows += '<tr>'
+              + '<td class="' + keyClass + '"' + indent + '>' + esc(k) + '</td>'
+              + '<td class="field-val-obj">{&hellip;}</td>'
+              + '</tr>';
+        addRows(v, depth + 1);
+      } else {
+        const display = Array.isArray(v) ? JSON.stringify(v) : String(v == null ? '' : v);
+        rows += '<tr>'
+              + '<td class="' + keyClass + '"' + indent + '>' + esc(k) + '</td>'
+              + '<td>' + esc(display) + '</td>'
+              + '</tr>';
+      }
+    }
+  }
+
+  addRows(fields, 0);
+
+  return '<table class="fields-table"><thead><tr><th>Field</th><th>Value</th></tr></thead>'
+       + '<tbody>' + rows + '</tbody></table>';
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Tab switching
+═══════════════════════════════════════════════════════════════════════════ */
+function activateTab(tabId) {
+  document.querySelectorAll('.tab-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === tabId)
+  );
+  document.querySelectorAll('.tab-panel').forEach(p =>
+    p.classList.toggle('active', p.id === tabId)
+  );
+}
+
+document.querySelectorAll('.tab-btn').forEach(btn =>
+  btn.addEventListener('click', () => activateTab(btn.dataset.tab))
+);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Batch processing
+═══════════════════════════════════════════════════════════════════════════ */
+async function processBatch() {
+  if (batchFiles.length === 0) return;
+
+  batchProcessBtn.disabled = true;
+  batchSpinner.classList.remove('hidden');
+  batchResults.innerHTML = '';
+  hideError();
+
+  batchFiles.forEach((_, i) => {
+    const el = $('bstatus-' + i);
+    if (el) { el.textContent = 'uploading…'; el.style.color = ''; }
+  });
+
+  const formData = new FormData();
+  batchFiles.forEach(f => formData.append('files', f));
+
+  try {
+    const resp = await fetch('/batch', { method: 'POST', body: formData });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => resp.statusText);
+      throw new Error('Server error ' + resp.status + ': ' + text);
+    }
+    const results = await resp.json();
+    batchSpinner.classList.add('hidden');
+    batchProcessBtn.disabled = false;
+    renderBatchResults(results);
+  } catch (err) {
+    batchSpinner.classList.add('hidden');
+    batchProcessBtn.disabled = false;
+    showError(err.message || 'Batch processing failed');
+    batchFiles.forEach((_, i) => {
+      const el = $('bstatus-' + i);
+      if (el && el.textContent.includes('uploading')) {
+        el.textContent = 'failed'; el.style.color = 'var(--red)';
+      }
+    });
+  }
+}
+
+function renderBatchResults(results) {
+  let html =
+    '<table class="batch-results-table">' +
+    '<thead><tr><th>Filename</th><th>Type</th><th>Confidence</th><th>Status</th><th>Time</th></tr></thead>' +
+    '<tbody>';
+
+  results.forEach((r, i) => {
+    const output  = r.output || {};
+    const docType = output.doc_type || r.doc_type || '—';
+    const rawConf = output.confidence ?? r.confidence;
+    const conf    = parseFloat(rawConf);
+    const confPct = isNaN(conf) ? 0 : (conf <= 1 ? conf * 100 : conf);
+    const fname   = batchFiles[i] ? esc(batchFiles[i].name) : '—';
+    const status  = r.status || '—';
+    const time    = r.total_duration_ms != null ? formatMs(r.total_duration_ms) : '—';
+
+    const statusCls = status === 'success' ? 'badge-valid'
+                    : status === 'failed'  ? 'badge-invalid'
+                    : 'badge-warn';
+
+    html +=
+      '<tr>' +
+      '<td>' + fname + '</td>' +
+      '<td><span class="badge badge-type" style="font-size:10px">' + esc(docType) + '</span></td>' +
+      '<td>' + confPct.toFixed(0) + '%</td>' +
+      '<td><span class="badge ' + statusCls + '" style="font-size:10px">' + esc(status) + '</span></td>' +
+      '<td style="color:var(--muted)">' + esc(time) + '</td>' +
+      '</tr>';
+
+    // Update per-file status in the list
+    const statusEl = $('bstatus-' + i);
+    if (statusEl) {
+      statusEl.textContent = status;
+      statusEl.style.color = status === 'success' ? 'var(--green)'
+                           : status === 'failed'  ? 'var(--red)'
+                           : 'var(--yellow)';
+    }
+  });
+
+  html += '</tbody></table>';
+  batchResults.innerHTML = html;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Drop zone events
+═══════════════════════════════════════════════════════════════════════════ */
+dropZone.addEventListener('click', () => fileInput.click());
+
+dropZone.addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+});
+
+dropZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  dropZone.classList.add('drag-over');
+});
+
+dropZone.addEventListener('dragleave', e => {
+  if (!dropZone.contains(e.relatedTarget)) dropZone.classList.remove('drag-over');
+});
+
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  handleFiles(e.dataTransfer.files);
+});
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length > 0) handleFiles(fileInput.files);
+});
+
+/* Whole-page drag target (catch drops outside the drop zone) */
+document.addEventListener('dragover', e => e.preventDefault());
+document.addEventListener('drop', e => {
+  if (e.target === dropZone || dropZone.contains(e.target)) return;
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  handleFiles(e.dataTransfer.files);
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Button / nav wiring
+═══════════════════════════════════════════════════════════════════════════ */
+cancelBtn.addEventListener('click', resetToIdle);
+resetBtn.addEventListener('click', resetToIdle);
+batchProcessBtn.addEventListener('click', processBatch);
+
+function switchToBatch() {
+  batchFiles = [];
+  enterBatchMode();
+  renderBatchList();
+  fileInput.setAttribute('multiple', '');
+  fileInput.click();
+}
+
+navBatch.addEventListener('click',    e => { e.preventDefault(); switchToBatch(); });
+batchLinkEl.addEventListener('click', e => { e.preventDefault(); switchToBatch(); });
+</script>
+</body>
+</html>
