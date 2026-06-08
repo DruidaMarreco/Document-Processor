@@ -215,10 +215,18 @@ async def get_document(document_id: UUID) -> Document | None:
     return None
 
 
+_SORT_COLUMNS = {"created_at", "doc_type", "filename", "pipeline_status"}
+
+
 async def search_results(
     doc_type: str | None = None,
     status: str | None = None,
     filename: str | None = None,
+    q: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[PipelineResult], int]:
@@ -234,8 +242,19 @@ async def search_results(
     if filename:
         conditions.append("filename LIKE ?")
         params.append(f"%{filename}%")
+    if q:
+        conditions.append("data LIKE ?")
+        params.append(f"%{q}%")
+    if date_from:
+        conditions.append("created_at >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("created_at <= ?")
+        params.append(date_to)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    col = sort_by if sort_by in _SORT_COLUMNS else "created_at"
+    order = "ASC" if sort_order.lower() == "asc" else "DESC"
     _ensure_dir()
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(_DDL_RESULTS)
@@ -245,7 +264,7 @@ async def search_results(
         ) as cursor:
             total: int = (await cursor.fetchone())[0]  # type: ignore[index]
         async with db.execute(
-            f"SELECT data FROM results {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            f"SELECT data FROM results {where} ORDER BY {col} {order} LIMIT ? OFFSET ?",
             params + [limit, offset],
         ) as cursor:
             rows = await cursor.fetchall()
