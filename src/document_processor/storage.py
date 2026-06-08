@@ -1,7 +1,8 @@
-"""Async SQLite persistence for Document, PipelineResult, and WebhookConfig objects."""
+"""Async SQLite persistence for Document, PipelineResult, WebhookConfig, and ApiKey objects."""
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -9,7 +10,7 @@ from uuid import UUID
 
 import aiosqlite
 
-from document_processor.models import Document, PipelineResult, WebhookConfig
+from document_processor.models import ApiKey, ApiKeyInfo, Document, PipelineResult, WebhookConfig
 
 _DB_PATH = Path("data/results.db")
 
@@ -41,6 +42,14 @@ _DDL_WEBHOOKS = """
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_API_KEYS = """
+    CREATE TABLE IF NOT EXISTS api_keys (
+        key_hash   TEXT PRIMARY KEY,
+        prefix     TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 # Columns added after initial schema — migrated at startup
 _MIGRATION_COLUMNS = [
     ("doc_type",        "TEXT"),
@@ -69,6 +78,7 @@ async def init_db() -> None:
         await db.execute(_DDL_RESULTS)
         await db.execute(_DDL_DOCUMENTS)
         await db.execute(_DDL_WEBHOOKS)
+        await db.execute(_DDL_API_KEYS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -350,3 +360,57 @@ def result_to_csv(result: PipelineResult) -> str:
     writer.writeheader()
     writer.writerow(row)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# API key persistence
+# ---------------------------------------------------------------------------
+
+def _hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+async def save_api_key(api_key: ApiKey) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_API_KEYS)
+        await db.execute(
+            "INSERT OR REPLACE INTO api_keys (key_hash, prefix, name) VALUES (?, ?, ?)",
+            (_hash_key(api_key.key), api_key.key[:8], api_key.name),
+        )
+        await db.commit()
+
+
+async def verify_api_key(key: str) -> bool:
+    """Return True if the key exists in the database."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_API_KEYS)
+        await db.commit()
+        async with db.execute(
+            "SELECT 1 FROM api_keys WHERE key_hash = ?", (_hash_key(key),)
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+
+async def list_api_keys() -> list[ApiKeyInfo]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_API_KEYS)
+        await db.commit()
+        async with db.execute(
+            "SELECT prefix, name, created_at FROM api_keys ORDER BY created_at DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [ApiKeyInfo(prefix=r[0], name=r[1], created_at=r[2]) for r in rows]
+
+
+async def delete_api_key_by_prefix(prefix: str) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_API_KEYS)
+        cursor = await db.execute(
+            "DELETE FROM api_keys WHERE prefix = ?", (prefix,)
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0

@@ -2,21 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from document_processor import registry, storage
-from document_processor.models import Document, PipelineResult, WebhookConfig
+from document_processor.auth import require_api_key
+from document_processor.models import ApiKey, ApiKeyInfo, Document, PipelineResult, WebhookConfig
 from document_processor.webhook_delivery import fire_webhooks
 from monitoring_module.api import app as _monitoring_app
 
 _UPLOAD_HTML = (Path(__file__).parent / "upload.html").read_text()
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 
 
 @asynccontextmanager
@@ -26,6 +33,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Document Processor", version="0.1.0", lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -62,8 +71,13 @@ async def _notify_webhooks(event: str, result: PipelineResult) -> None:
     await fire_webhooks(webhooks, event, result)
 
 
-@app.post("/process", response_model=PipelineResult)
-async def process_document(file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
+@app.post("/process", response_model=PipelineResult, dependencies=[Depends(require_api_key)])
+@limiter.limit("30/minute")
+async def process_document(
+    request: Request,
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+):
     content = await file.read()
     document = Document(
         filename=file.filename,
@@ -78,8 +92,9 @@ async def process_document(file: UploadFile = File(...), background_tasks: Backg
     return result
 
 
-@app.post("/process/stream")
-async def process_stream(file: UploadFile = File(...)):
+@app.post("/process/stream", dependencies=[Depends(require_api_key)])
+@limiter.limit("30/minute")
+async def process_stream(request: Request, file: UploadFile = File(...)):
     """Process a single document and stream SSE events for each pipeline stage."""
     content = await file.read()
     document = Document(
@@ -121,8 +136,13 @@ async def process_stream(file: UploadFile = File(...)):
     )
 
 
-@app.post("/batch")
-async def batch_process(files: list[UploadFile] = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
+@app.post("/batch", dependencies=[Depends(require_api_key)])
+@limiter.limit("10/minute")
+async def batch_process(
+    request: Request,
+    files: list[UploadFile] = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+):
     """Process multiple documents concurrently."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -157,13 +177,13 @@ async def batch_process(files: list[UploadFile] = File(...), background_tasks: B
 # Results endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/results/stats")
+@app.get("/results/stats", dependencies=[Depends(require_api_key)])
 async def results_stats():
     """Aggregate statistics: counts by status/doc_type, avg duration, last 24 h."""
     return await storage.get_stats()
 
 
-@app.get("/results")
+@app.get("/results", dependencies=[Depends(require_api_key)])
 async def list_results(
     doc_type: str | None = Query(None, description="Filter by document type (invoice, contract, …)"),
     status: str | None = Query(None, description="Filter by pipeline status (success, partial, failed)"),
@@ -183,7 +203,7 @@ async def list_results(
     }
 
 
-@app.get("/results/{document_id}/export")
+@app.get("/results/{document_id}/export", dependencies=[Depends(require_api_key)])
 async def export_result(
     document_id: UUID,
     format: str = Query("json", description="Export format: json or csv"),
@@ -207,7 +227,8 @@ async def export_result(
     )
 
 
-@app.post("/results/{document_id}/reprocess", response_model=PipelineResult)
+@app.post("/results/{document_id}/reprocess", response_model=PipelineResult,
+          dependencies=[Depends(require_api_key)])
 async def reprocess_document(document_id: UUID, background_tasks: BackgroundTasks = BackgroundTasks()):
     """Re-run the full pipeline on the original stored document bytes."""
     document = await storage.get_document(document_id)
@@ -224,7 +245,8 @@ async def reprocess_document(document_id: UUID, background_tasks: BackgroundTask
     return result
 
 
-@app.get("/results/{document_id}", response_model=PipelineResult)
+@app.get("/results/{document_id}", response_model=PipelineResult,
+         dependencies=[Depends(require_api_key)])
 async def get_result(document_id: UUID):
     result = await storage.get_result(document_id)
     if not result:
@@ -232,7 +254,7 @@ async def get_result(document_id: UUID):
     return result
 
 
-@app.delete("/results/{document_id}", status_code=204)
+@app.delete("/results/{document_id}", status_code=204, dependencies=[Depends(require_api_key)])
 async def delete_result(document_id: UUID):
     """Delete a stored result and its original document bytes."""
     result = await storage.get_result(document_id)
@@ -251,20 +273,53 @@ class WebhookCreate(BaseModel):
     secret: str | None = None
 
 
-@app.post("/webhooks", response_model=WebhookConfig, status_code=201)
+@app.post("/webhooks", response_model=WebhookConfig, status_code=201,
+          dependencies=[Depends(require_api_key)])
 async def create_webhook(body: WebhookCreate):
     wh = WebhookConfig(url=body.url, events=body.events, secret=body.secret)
     await storage.save_webhook(wh)
     return wh
 
 
-@app.get("/webhooks", response_model=list[WebhookConfig])
+@app.get("/webhooks", response_model=list[WebhookConfig],
+         dependencies=[Depends(require_api_key)])
 async def list_webhooks():
     return await storage.list_webhooks()
 
 
-@app.delete("/webhooks/{webhook_id}", status_code=204)
+@app.delete("/webhooks/{webhook_id}", status_code=204,
+            dependencies=[Depends(require_api_key)])
 async def delete_webhook(webhook_id: UUID):
     deleted = await storage.delete_webhook(webhook_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Webhook not found")
+
+
+# ---------------------------------------------------------------------------
+# API key management endpoints  (no auth required — bootstrap path)
+# ---------------------------------------------------------------------------
+
+class ApiKeyCreate(BaseModel):
+    name: str
+
+
+@app.post("/api-keys", response_model=ApiKey, status_code=201)
+async def create_api_key(body: ApiKeyCreate):
+    """Create a new API key. The full key is returned only once."""
+    key = secrets.token_urlsafe(32)
+    api_key = ApiKey(key=key, name=body.name)
+    await storage.save_api_key(api_key)
+    return api_key
+
+
+@app.get("/api-keys", response_model=list[ApiKeyInfo])
+async def list_api_keys():
+    """List all registered API keys (prefixes only — full keys are never re-exposed)."""
+    return await storage.list_api_keys()
+
+
+@app.delete("/api-keys/{prefix}", status_code=204)
+async def delete_api_key(prefix: str):
+    deleted = await storage.delete_api_key_by_prefix(prefix)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="API key not found")
