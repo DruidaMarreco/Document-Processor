@@ -45,3 +45,15 @@ class WebhookConfig(BaseModel):
     secret: str | None = None
     active: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ApiKey(BaseModel):
+    key: str  # full key — only returned at creation time
+    name: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ApiKeyInfo(BaseModel):
+    prefix: str  # first 8 chars, safe to display
+    name: str
+    created_at: datetime

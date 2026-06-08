@@ -84,21 +84,33 @@ LLM config (all prefixed `DOC_PROCESSOR_`):
 | `src/document_processor/registry.py` | Change which modules run or their order |
 | `src/document_processor/config.py` | All tuneable settings |
 | `src/document_processor/storage.py` | Swap SQLite for another store here |
+| `src/document_processor/auth.py` | API key `Depends` — open when no keys registered |
+| `src/document_processor/webhook_delivery.py` | HMAC-signed HTTP delivery with retries |
 | `src/monitoring_module/store.py` | `EventStore` — stats, SSE fanout, ring buffer |
 | `src/llm_client/client.py` | All Anthropic API calls live here |
 
 ## HTTP endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/` | Upload UI (upload.html) |
-| `POST` | `/process` | Process one file, return `PipelineResult` |
-| `POST` | `/process/stream` | Process one file, stream SSE stage events + final result |
-| `POST` | `/batch` | Process up to 20 files concurrently |
-| `GET` | `/results` | List stored results (SQLite, `?limit=N`) |
-| `GET` | `/results/{id}` | Fetch one result by document UUID |
-| `GET` | `/health` | Health check + stored result count |
-| `GET` | `/monitoring/` | Live SSE dashboard |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/` | — | Upload UI (upload.html) |
+| `GET` | `/health` | — | Health check + stored result count |
+| `POST` | `/process` | key | Process one file, return `PipelineResult` |
+| `POST` | `/process/stream` | key | Process one file, stream SSE stage events + final result |
+| `POST` | `/batch` | key | Process up to 20 files concurrently |
+| `GET` | `/results` | key | List/search results (`?doc_type=`, `?status=`, `?filename=`, `?limit=`, `?offset=`) |
+| `GET` | `/results/stats` | key | Aggregate counts by status/doc_type, avg duration, 24 h count |
+| `GET` | `/results/{id}` | key | Fetch one result by document UUID |
+| `DELETE` | `/results/{id}` | key | Delete result and its stored document bytes |
+| `GET` | `/results/{id}/export` | key | Download as JSON or CSV (`?format=json\|csv`) |
+| `POST` | `/results/{id}/reprocess` | key | Re-run pipeline on original stored bytes |
+| `POST` | `/webhooks` | key | Register an HTTP callback |
+| `GET` | `/webhooks` | key | List registered webhooks |
+| `DELETE` | `/webhooks/{id}` | key | Remove a webhook |
+| `POST` | `/api-keys` | — | Create API key (full key returned once) |
+| `GET` | `/api-keys` | — | List API keys (prefix + name only) |
+| `DELETE` | `/api-keys/{prefix}` | — | Revoke an API key |
+| `GET` | `/monitoring/` | — | Live SSE dashboard |
 | `GET` | `/monitoring/events` | Raw SSE stream |
 | `GET` | `/monitoring/stats` | Aggregate stats JSON |
 | `GET` | `/monitoring/history` | Recent events JSON (`?n=100`) |

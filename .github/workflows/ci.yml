@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["main", "claude/**"]
+    branches: [main, dev, "feat/**"]
   pull_request:
-    branches: ["main"]
+    branches: [main, dev]
 
 jobs:
   test:
@@ -26,4 +26,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest -v
+        run: pytest -q --tb=short
+
+      - name: Check import health
+        run: python -c "from document_processor.api import app; print('import ok')"
