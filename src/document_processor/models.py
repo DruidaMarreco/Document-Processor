@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl
 
 
 class Document(BaseModel):
@@ -33,3 +33,15 @@ class PipelineResult(BaseModel):
     output: dict[str, Any] = Field(default_factory=dict)
     total_duration_ms: float
     completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+WebhookEvent = Literal["document.processed", "document.failed", "document.reprocessed"]
+
+
+class WebhookConfig(BaseModel):
+    id: UUID = Field(default_factory=uuid4)
+    url: str
+    events: list[str] = Field(default_factory=lambda: ["document.processed", "document.failed"])
+    secret: str | None = None
+    active: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
