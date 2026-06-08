@@ -6,12 +6,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from pydantic import BaseModel
 
 from document_processor import registry, storage
-from document_processor.models import Document, PipelineResult
+from document_processor.models import Document, PipelineResult, WebhookConfig
+from document_processor.webhook_delivery import fire_webhooks
 from monitoring_module.api import app as _monitoring_app
 
 _UPLOAD_HTML = (Path(__file__).parent / "upload.html").read_text()
@@ -55,8 +57,13 @@ async def health():
 # Process endpoints
 # ---------------------------------------------------------------------------
 
+async def _notify_webhooks(event: str, result: PipelineResult) -> None:
+    webhooks = await storage.list_webhooks(active_only=True)
+    await fire_webhooks(webhooks, event, result)
+
+
 @app.post("/process", response_model=PipelineResult)
-async def process_document(file: UploadFile = File(...)):
+async def process_document(file: UploadFile = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
     content = await file.read()
     document = Document(
         filename=file.filename,
@@ -66,6 +73,8 @@ async def process_document(file: UploadFile = File(...)):
     pipeline = registry.build_pipeline()
     result = await pipeline.run(document)
     await storage.save_result(result, document=document)
+    event = "document.processed" if result.status != "failed" else "document.failed"
+    background_tasks.add_task(_notify_webhooks, event, result)
     return result
 
 
@@ -100,6 +109,8 @@ async def process_stream(file: UploadFile = File(...)):
 
         final = await task
         await storage.save_result(final, document=document)
+        event = "document.processed" if final.status != "failed" else "document.failed"
+        asyncio.create_task(_notify_webhooks(event, final))
         payload = json.dumps({"type": "done", **final.model_dump(mode="json")})
         yield f"data: {payload}\n\n"
 
@@ -111,7 +122,7 @@ async def process_stream(file: UploadFile = File(...)):
 
 
 @app.post("/batch")
-async def batch_process(files: list[UploadFile] = File(...)):
+async def batch_process(files: list[UploadFile] = File(...), background_tasks: BackgroundTasks = BackgroundTasks()):
     """Process multiple documents concurrently."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
@@ -129,6 +140,8 @@ async def batch_process(files: list[UploadFile] = File(...)):
         try:
             result = await pipeline.run(document)
             await storage.save_result(result, document=document)
+            event = "document.processed" if result.status != "failed" else "document.failed"
+            background_tasks.add_task(_notify_webhooks, event, result)
             return result.model_dump(mode="json")
         except Exception as exc:
             return {"filename": file.filename, "status": "failed", "error": str(exc)}
@@ -143,6 +156,12 @@ async def batch_process(files: list[UploadFile] = File(...)):
 # ---------------------------------------------------------------------------
 # Results endpoints
 # ---------------------------------------------------------------------------
+
+@app.get("/results/stats")
+async def results_stats():
+    """Aggregate statistics: counts by status/doc_type, avg duration, last 24 h."""
+    return await storage.get_stats()
+
 
 @app.get("/results")
 async def list_results(
@@ -189,7 +208,7 @@ async def export_result(
 
 
 @app.post("/results/{document_id}/reprocess", response_model=PipelineResult)
-async def reprocess_document(document_id: UUID):
+async def reprocess_document(document_id: UUID, background_tasks: BackgroundTasks = BackgroundTasks()):
     """Re-run the full pipeline on the original stored document bytes."""
     document = await storage.get_document(document_id)
     if not document:
@@ -201,6 +220,7 @@ async def reprocess_document(document_id: UUID):
     pipeline = registry.build_pipeline()
     result = await pipeline.run(document)
     await storage.save_result(result, document=document)
+    background_tasks.add_task(_notify_webhooks, "document.reprocessed", result)
     return result
 
 
@@ -210,3 +230,41 @@ async def get_result(document_id: UUID):
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
     return result
+
+
+@app.delete("/results/{document_id}", status_code=204)
+async def delete_result(document_id: UUID):
+    """Delete a stored result and its original document bytes."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.delete_result(document_id)
+
+
+# ---------------------------------------------------------------------------
+# Webhook endpoints
+# ---------------------------------------------------------------------------
+
+class WebhookCreate(BaseModel):
+    url: str
+    events: list[str] = ["document.processed", "document.failed", "document.reprocessed"]
+    secret: str | None = None
+
+
+@app.post("/webhooks", response_model=WebhookConfig, status_code=201)
+async def create_webhook(body: WebhookCreate):
+    wh = WebhookConfig(url=body.url, events=body.events, secret=body.secret)
+    await storage.save_webhook(wh)
+    return wh
+
+
+@app.get("/webhooks", response_model=list[WebhookConfig])
+async def list_webhooks():
+    return await storage.list_webhooks()
+
+
+@app.delete("/webhooks/{webhook_id}", status_code=204)
+async def delete_webhook(webhook_id: UUID):
+    deleted = await storage.delete_webhook(webhook_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Webhook not found")

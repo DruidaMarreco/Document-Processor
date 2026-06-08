@@ -1,4 +1,4 @@
-"""Async SQLite persistence for Document and PipelineResult objects."""
+"""Async SQLite persistence for Document, PipelineResult, and WebhookConfig objects."""
 from __future__ import annotations
 
 import csv
@@ -9,7 +9,7 @@ from uuid import UUID
 
 import aiosqlite
 
-from document_processor.models import Document, PipelineResult
+from document_processor.models import Document, PipelineResult, WebhookConfig
 
 _DB_PATH = Path("data/results.db")
 
@@ -29,6 +29,16 @@ _DDL_DOCUMENTS = """
         filename TEXT,
         mimetype TEXT,
         content  BLOB NOT NULL
+    )
+"""
+_DDL_WEBHOOKS = """
+    CREATE TABLE IF NOT EXISTS webhooks (
+        id         TEXT PRIMARY KEY,
+        url        TEXT NOT NULL,
+        events     TEXT NOT NULL,
+        secret     TEXT,
+        active     INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
 # Columns added after initial schema — migrated at startup
@@ -58,6 +68,7 @@ async def init_db() -> None:
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(_DDL_RESULTS)
         await db.execute(_DDL_DOCUMENTS)
+        await db.execute(_DDL_WEBHOOKS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -168,6 +179,14 @@ async def search_results(
     return [PipelineResult.model_validate_json(r[0]) for r in rows], total
 
 
+async def delete_result(document_id: UUID) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute("DELETE FROM results WHERE id = ?", (str(document_id),))
+        await db.execute("DELETE FROM documents WHERE id = ?", (str(document_id),))
+        await db.commit()
+
+
 async def list_results(limit: int = 100) -> list[PipelineResult]:
     results, _ = await search_results(limit=limit)
     return results
@@ -181,6 +200,115 @@ async def count_results() -> int:
         async with db.execute("SELECT COUNT(*) FROM results") as cursor:
             row = await cursor.fetchone()
     return row[0] if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Webhook persistence
+# ---------------------------------------------------------------------------
+
+async def save_webhook(wh: WebhookConfig) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOKS)
+        await db.execute(
+            """INSERT OR REPLACE INTO webhooks (id, url, events, secret, active)
+               VALUES (?, ?, ?, ?, ?)""",
+            (str(wh.id), wh.url, json.dumps(wh.events), wh.secret, int(wh.active)),
+        )
+        await db.commit()
+
+
+async def list_webhooks(active_only: bool = False) -> list[WebhookConfig]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOKS)
+        await db.commit()
+        where = "WHERE active = 1" if active_only else ""
+        async with db.execute(
+            f"SELECT id, url, events, secret, active, created_at FROM webhooks {where}"
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [
+        WebhookConfig(
+            id=row[0], url=row[1], events=json.loads(row[2]),
+            secret=row[3], active=bool(row[4]),
+        )
+        for row in rows
+    ]
+
+
+async def get_webhook(webhook_id: UUID) -> WebhookConfig | None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOKS)
+        await db.commit()
+        async with db.execute(
+            "SELECT id, url, events, secret, active FROM webhooks WHERE id = ?",
+            (str(webhook_id),),
+        ) as cursor:
+            row = await cursor.fetchone()
+    if not row:
+        return None
+    return WebhookConfig(
+        id=row[0], url=row[1], events=json.loads(row[2]),
+        secret=row[3], active=bool(row[4]),
+    )
+
+
+async def delete_webhook(webhook_id: UUID) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOKS)
+        cursor = await db.execute(
+            "DELETE FROM webhooks WHERE id = ?", (str(webhook_id),)
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Aggregate statistics
+# ---------------------------------------------------------------------------
+
+async def get_stats() -> dict:
+    """Return aggregate counts and averages across all stored results."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+
+        async with db.execute("SELECT COUNT(*) FROM results") as cur:
+            total: int = (await cur.fetchone())[0]  # type: ignore[index]
+
+        async with db.execute(
+            "SELECT pipeline_status, COUNT(*) FROM results GROUP BY pipeline_status"
+        ) as cur:
+            by_status = {row[0] or "unknown": row[1] for row in await cur.fetchall()}
+
+        async with db.execute(
+            "SELECT doc_type, COUNT(*) FROM results GROUP BY doc_type"
+        ) as cur:
+            by_doc_type = {row[0] or "unknown": row[1] for row in await cur.fetchall()}
+
+        async with db.execute(
+            "SELECT AVG(CAST(json_extract(data, '$.total_duration_ms') AS REAL)) FROM results"
+        ) as cur:
+            row = await cur.fetchone()
+            avg_duration_ms: float = round(row[0] or 0.0, 2)
+
+        async with db.execute(
+            "SELECT COUNT(*) FROM results WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', "
+            "datetime('now', '-1 day'))"
+        ) as cur:
+            recent_24h: int = (await cur.fetchone())[0]  # type: ignore[index]
+
+    return {
+        "total": total,
+        "by_status": by_status,
+        "by_doc_type": by_doc_type,
+        "avg_duration_ms": avg_duration_ms,
+        "recent_24h": recent_24h,
+    }
 
 
 def result_to_csv(result: PipelineResult) -> str:
