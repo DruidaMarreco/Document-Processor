@@ -26,10 +26,19 @@ _DDL_RESULTS = """
 """
 _DDL_DOCUMENTS = """
     CREATE TABLE IF NOT EXISTS documents (
-        id       TEXT PRIMARY KEY,
-        filename TEXT,
-        mimetype TEXT,
-        content  BLOB NOT NULL
+        id           TEXT PRIMARY KEY,
+        filename     TEXT,
+        mimetype     TEXT,
+        content      BLOB NOT NULL,
+        content_hash TEXT
+    )
+"""
+_DDL_TAGS = """
+    CREATE TABLE IF NOT EXISTS tags (
+        result_id  TEXT NOT NULL,
+        tag        TEXT NOT NULL,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (result_id, tag)
     )
 """
 _DDL_WEBHOOKS = """
@@ -69,6 +78,9 @@ _MIGRATION_COLUMNS = [
     ("pipeline_status", "TEXT"),
     ("filename",        "TEXT"),
 ]
+_MIGRATION_DOCUMENTS_COLUMNS = [
+    ("content_hash", "TEXT"),
+]
 
 
 def _db_path() -> Path:
@@ -93,12 +105,18 @@ async def init_db() -> None:
         await db.execute(_DDL_WEBHOOKS)
         await db.execute(_DDL_API_KEYS)
         await db.execute(_DDL_JOBS)
+        await db.execute(_DDL_TAGS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
                 await db.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
             except Exception:
                 pass  # column already exists
+        for col, col_type in _MIGRATION_DOCUMENTS_COLUMNS:
+            try:
+                await db.execute(f"ALTER TABLE documents ADD COLUMN {col} {col_type}")
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -114,6 +132,29 @@ def _extract_meta(result: PipelineResult) -> tuple[str | None, str, str | None]:
     return doc_type, result.status, filename
 
 
+def _content_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+async def find_duplicate(content: bytes) -> PipelineResult | None:
+    """Return the most recent result for documents with identical content, or None."""
+    h = _content_hash(content)
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_DOCUMENTS)
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            """SELECT r.data FROM results r
+               JOIN documents d ON d.id = r.id
+               WHERE d.content_hash = ?
+               ORDER BY r.created_at DESC LIMIT 1""",
+            (h,),
+        ) as cursor:
+            row = await cursor.fetchone()
+    return PipelineResult.model_validate_json(row[0]) if row else None
+
+
 async def save_result(result: PipelineResult, document: Document | None = None) -> None:
     doc_type, pipeline_status, filename = _extract_meta(result)
     _ensure_dir()
@@ -127,11 +168,12 @@ async def save_result(result: PipelineResult, document: Document | None = None) 
              result.model_dump_json()),
         )
         if document is not None:
+            h = _content_hash(document.content)
             await db.execute(
-                """INSERT OR REPLACE INTO documents (id, filename, mimetype, content)
-                   VALUES (?, ?, ?, ?)""",
+                """INSERT OR REPLACE INTO documents (id, filename, mimetype, content, content_hash)
+                   VALUES (?, ?, ?, ?, ?)""",
                 (str(result.document_id), document.filename,
-                 document.mimetype, document.content),
+                 document.mimetype, document.content, h),
             )
         await db.commit()
 
@@ -460,9 +502,10 @@ async def create_job(job: JobRecord, document: Document) -> None:
             (str(job.job_id), job.status, job.filename, job.mimetype),
         )
         await db.execute(
-            """INSERT OR REPLACE INTO documents (id, filename, mimetype, content)
-               VALUES (?, ?, ?, ?)""",
-            (str(job.job_id), document.filename, document.mimetype, document.content),
+            """INSERT OR REPLACE INTO documents (id, filename, mimetype, content, content_hash)
+               VALUES (?, ?, ?, ?, ?)""",
+            (str(job.job_id), document.filename, document.mimetype, document.content,
+             _content_hash(document.content)),
         )
         await db.commit()
 
@@ -523,3 +566,70 @@ async def list_jobs(limit: int = 50, offset: int = 0) -> list[JobRecord]:
 async def get_job_document(job_id: UUID) -> Document | None:
     """Retrieve document bytes stored when the job was queued."""
     return await get_document(job_id)
+
+
+# ---------------------------------------------------------------------------
+# Result tagging
+# ---------------------------------------------------------------------------
+
+async def add_tags(result_id: UUID, tags: list[str]) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_TAGS)
+        for tag in tags:
+            await db.execute(
+                "INSERT OR IGNORE INTO tags (result_id, tag) VALUES (?, ?)",
+                (str(result_id), tag.strip().lower()),
+            )
+        await db.commit()
+
+
+async def get_tags(result_id: UUID) -> list[str]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_TAGS)
+        await db.commit()
+        async with db.execute(
+            "SELECT tag FROM tags WHERE result_id = ? ORDER BY tag",
+            (str(result_id),),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [r[0] for r in rows]
+
+
+async def remove_tag(result_id: UUID, tag: str) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_TAGS)
+        cursor = await db.execute(
+            "DELETE FROM tags WHERE result_id = ? AND tag = ?",
+            (str(result_id), tag.strip().lower()),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def search_results_by_tag(
+    tag: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[PipelineResult], int]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.execute(_DDL_TAGS)
+        await db.commit()
+        async with db.execute(
+            "SELECT COUNT(*) FROM results r JOIN tags t ON t.result_id = r.id WHERE t.tag = ?",
+            (tag.strip().lower(),),
+        ) as cur:
+            total: int = (await cur.fetchone())[0]  # type: ignore[index]
+        async with db.execute(
+            """SELECT r.data FROM results r
+               JOIN tags t ON t.result_id = r.id
+               WHERE t.tag = ?
+               ORDER BY r.created_at DESC LIMIT ? OFFSET ?""",
+            (tag.strip().lower(), limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [PipelineResult.model_validate_json(r[0]) for r in rows], total
