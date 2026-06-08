@@ -10,6 +10,7 @@ dependencies = [
     "loguru>=0.7",
     "python-multipart>=0.0.9",
     "anthropic>=0.40",
+    "aiosqlite>=0.20",
 ]
 
 [project.optional-dependencies]

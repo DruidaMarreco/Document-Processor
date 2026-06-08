@@ -1,0 +1,21 @@
+services:
+  document-processor:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data      # SQLite database
+      - ./logs:/app/logs      # structured JSON logs
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - DOC_PROCESSOR_LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DOC_PROCESSOR_LLM_ENABLED=${LLM_ENABLED:-true}
+      - DOC_PROCESSOR_LLM_CONFIDENCE_THRESHOLD=${LLM_CONFIDENCE_THRESHOLD:-0.5}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
