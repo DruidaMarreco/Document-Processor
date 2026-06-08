@@ -86,8 +86,17 @@ async def process_document(
     request: Request,
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
+    dedup: bool = Query(False, description="Return cached result for identical content"),
 ):
     content = await file.read()
+    if dedup:
+        cached = await storage.find_duplicate(content)
+        if cached:
+            return Response(
+                content=cached.model_dump_json(),
+                media_type="application/json",
+                headers={"X-Dedup-Result": "true", "X-Document-Id": str(cached.document_id)},
+            )
     document = Document(
         filename=file.filename,
         mimetype=file.content_type or "application/octet-stream",
@@ -197,13 +206,17 @@ async def list_results(
     doc_type: str | None = Query(None, description="Filter by document type (invoice, contract, …)"),
     status: str | None = Query(None, description="Filter by pipeline status (success, partial, failed)"),
     filename: str | None = Query(None, description="Partial filename match"),
+    tag: str | None = Query(None, description="Filter by tag (exact, case-insensitive)"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    results, total = await storage.search_results(
-        doc_type=doc_type, status=status, filename=filename,
-        limit=limit, offset=offset,
-    )
+    if tag:
+        results, total = await storage.search_results_by_tag(tag=tag, limit=limit, offset=offset)
+    else:
+        results, total = await storage.search_results(
+            doc_type=doc_type, status=status, filename=filename,
+            limit=limit, offset=offset,
+        )
     return {
         "total": total,
         "offset": offset,
@@ -270,6 +283,42 @@ async def delete_result(document_id: UUID):
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
     await storage.delete_result(document_id)
+
+
+# ---------------------------------------------------------------------------
+# Tagging endpoints
+# ---------------------------------------------------------------------------
+
+class TagsBody(BaseModel):
+    tags: list[str]
+
+
+@app.post("/results/{document_id}/tags", status_code=204,
+          dependencies=[Depends(require_api_key)])
+async def add_tags(document_id: UUID, body: TagsBody):
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.add_tags(document_id, body.tags)
+
+
+@app.get("/results/{document_id}/tags", dependencies=[Depends(require_api_key)])
+async def get_tags(document_id: UUID):
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    return {"tags": await storage.get_tags(document_id)}
+
+
+@app.delete("/results/{document_id}/tags/{tag}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def remove_tag(document_id: UUID, tag: str):
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    removed = await storage.remove_tag(document_id, tag)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Tag not found")
 
 
 # ---------------------------------------------------------------------------
