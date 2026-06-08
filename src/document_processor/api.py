@@ -2,18 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
-from document_processor import registry
+from document_processor import registry, storage
 from document_processor.models import Document, PipelineResult
 from monitoring_module.api import app as _monitoring_app
 
-app = FastAPI(title="Document Processor", version="0.1.0")
+_UPLOAD_HTML = (Path(__file__).parent / "upload.html").read_text()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    await storage.init_db()
+    yield
+
+
+app = FastAPI(title="Document Processor", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,9 +33,6 @@ app.add_middleware(
 )
 
 app.mount("/monitoring", _monitoring_app)
-
-_results: dict[UUID, PipelineResult] = {}
-_UPLOAD_HTML = (Path(__file__).parent / "upload.html").read_text()
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -40,7 +47,8 @@ async def upload_page() -> HTMLResponse:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0"}
+    n = await storage.count_results()
+    return {"status": "ok", "version": "0.1.0", "stored_results": n}
 
 
 @app.post("/process", response_model=PipelineResult)
@@ -53,7 +61,7 @@ async def process_document(file: UploadFile = File(...)):
     )
     pipeline = registry.build_pipeline()
     result = await pipeline.run(document)
-    _results[document.id] = result
+    await storage.save_result(result)
     return result
 
 
@@ -87,7 +95,7 @@ async def process_stream(file: UploadFile = File(...)):
                 yield ": keepalive\n\n"
 
         final = await task
-        _results[document.id] = final
+        await storage.save_result(final)
         payload = json.dumps({"type": "done", **final.model_dump(mode="json")})
         yield f"data: {payload}\n\n"
 
@@ -116,7 +124,7 @@ async def batch_process(files: list[UploadFile] = File(...)):
         pipeline = registry.build_pipeline()
         try:
             result = await pipeline.run(document)
-            _results[document.id] = result
+            await storage.save_result(result)
             return result.model_dump(mode="json")
         except Exception as exc:
             return {
@@ -134,12 +142,12 @@ async def batch_process(files: list[UploadFile] = File(...)):
 
 @app.get("/results/{document_id}", response_model=PipelineResult)
 async def get_result(document_id: UUID):
-    result = _results.get(document_id)
+    result = await storage.get_result(document_id)
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
     return result
 
 
 @app.get("/results", response_model=list[PipelineResult])
-async def list_results():
-    return list(_results.values())
+async def list_results(limit: int = 100):
+    return await storage.list_results(limit=limit)

@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from monitoring_module.store import store
 
@@ -51,3 +51,55 @@ async def stats() -> dict:
 async def history(n: int = 100) -> list[dict]:
     import json
     return [json.loads(e.to_sse().removeprefix("data: ").strip()) for e in store.recent(n)]
+
+
+@app.get("/metrics", response_class=Response)
+async def prometheus_metrics() -> Response:
+    s = store.stats
+    lines: list[str] = [
+        "# HELP doc_processor_documents_total Total documents processed through the pipeline",
+        "# TYPE doc_processor_documents_total counter",
+        f"doc_processor_documents_total {s['total']}",
+        "# HELP doc_processor_success_total Successful pipeline completions",
+        "# TYPE doc_processor_success_total counter",
+        f"doc_processor_success_total {s['success']}",
+        "# HELP doc_processor_errors_total Failed pipeline stage runs",
+        "# TYPE doc_processor_errors_total counter",
+        f"doc_processor_errors_total {s['error']}",
+        "# HELP doc_processor_llm_calls_total LLM API calls made (classify + extract)",
+        "# TYPE doc_processor_llm_calls_total counter",
+        f"doc_processor_llm_calls_total {s.get('llm_calls', 0)}",
+        "# HELP doc_processor_avg_duration_ms Average stage duration across all modules",
+        "# TYPE doc_processor_avg_duration_ms gauge",
+        f"doc_processor_avg_duration_ms {s.get('avg_duration_ms', 0)}",
+        "# HELP doc_processor_stage_duration_ms Average duration per pipeline stage",
+        "# TYPE doc_processor_stage_duration_ms gauge",
+    ]
+    for module, m in s.get("by_module", {}).items():
+        lines.append(f'doc_processor_stage_duration_ms{{module="{module}"}} {m["avg_ms"]}')
+
+    lines += [
+        "# HELP doc_processor_stage_errors_total Error count per pipeline stage",
+        "# TYPE doc_processor_stage_errors_total counter",
+    ]
+    for module, m in s.get("by_module", {}).items():
+        lines.append(f'doc_processor_stage_errors_total{{module="{module}"}} {m["error"]}')
+
+    lines += [
+        "# HELP doc_processor_route_total Documents processed by detected route",
+        "# TYPE doc_processor_route_total counter",
+    ]
+    for route, count in s.get("by_route", {}).items():
+        lines.append(f'doc_processor_route_total{{route="{route}"}} {count}')
+
+    lines += [
+        "# HELP doc_processor_doc_type_total Documents classified by type",
+        "# TYPE doc_processor_doc_type_total counter",
+    ]
+    for doc_type, count in s.get("by_doc_type", {}).items():
+        lines.append(f'doc_processor_doc_type_total{{doc_type="{doc_type}"}} {count}')
+
+    return Response(
+        content="\n".join(lines) + "\n",
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )

@@ -2,11 +2,20 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from document_processor import storage
 from document_processor.api import app
+
+
+@pytest.fixture(autouse=True)
+def tmp_db(tmp_path: Path):
+    storage.set_db_path(tmp_path / "test.db")
+    yield
+    storage.set_db_path(Path("data/results.db"))
 
 
 @pytest.mark.asyncio
