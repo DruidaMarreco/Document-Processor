@@ -13,6 +13,19 @@ from extractor_module.patterns import FIELD_PATTERNS
 
 _MAX_TEXT = 8_000  # chars kept in context for downstream stages
 
+# Optional OCR dependencies — gracefully absent
+try:
+    import pdfplumber as _pdfplumber
+except Exception:
+    _pdfplumber = None
+
+try:
+    import pytesseract as _pytesseract
+    from PIL import Image as _PILImage
+except Exception:
+    _pytesseract = None
+    _PILImage = None
+
 # Doc types where LLM extraction adds meaningful value beyond regex
 _LLM_ENRICHED_TYPES = {
     "invoice", "receipt", "purchase_order", "contract",
@@ -94,6 +107,10 @@ class ExtractorModule:
             return "", self._from_csv(document.content)
         if route == "html":
             return self._from_html(document.content), {}
+        if route == "pdf":
+            return self._from_pdf(document.content), {}
+        if route == "image":
+            return self._from_image_ocr(document.content), {}
         return self._from_text(document.content), {}
 
     def _from_json(self, content: bytes) -> tuple[str, dict]:
@@ -123,6 +140,27 @@ class ExtractorModule:
 
     def _from_text(self, content: bytes) -> str:
         return content.decode("utf-8", errors="ignore")
+
+    def _from_pdf(self, content: bytes) -> str:
+        if _pdfplumber is not None:
+            try:
+                with _pdfplumber.open(io.BytesIO(content)) as pdf:
+                    pages = [p.extract_text() or "" for p in pdf.pages]
+                text = "\n".join(pages).strip()
+                if text:
+                    return text
+            except Exception:
+                pass
+        return self._from_text(content)
+
+    def _from_image_ocr(self, content: bytes) -> str:
+        if _pytesseract is not None and _PILImage is not None:
+            try:
+                img = _PILImage.open(io.BytesIO(content))
+                return _pytesseract.image_to_string(img)
+            except Exception:
+                pass
+        return ""
 
     def _pattern_fields(self, text: str) -> dict:
         result: dict = {}
@@ -170,7 +208,6 @@ class ExtractorModule:
             if key not in merged:
                 merged[key] = llm_values
             else:
-                # Merge lists, deduplicating while preserving order
                 existing = merged[key]
                 if isinstance(existing, list) and isinstance(llm_values, list):
                     seen: set = set(map(str, existing))
