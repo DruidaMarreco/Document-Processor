@@ -16,5 +16,8 @@ class Settings(BaseSettings):
     llm_max_input_chars: int = 4_000
     llm_vision_enabled: bool = True
 
+    # Retention policy: 0 = disabled, N = delete results older than N days
+    retention_days: int = 0
+
 
 settings = Settings()

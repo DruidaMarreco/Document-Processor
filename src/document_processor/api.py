@@ -17,8 +17,10 @@ from slowapi.util import get_remote_address
 
 from document_processor import registry, storage
 from document_processor.auth import require_api_key
+from document_processor.config import settings
 from document_processor.job_worker import run_worker
 from document_processor.models import ApiKey, ApiKeyInfo, Document, JobRecord, PipelineResult, WebhookConfig
+from document_processor.retention import run_retention
 from document_processor.webhook_delivery import fire_webhooks
 from monitoring_module.api import app as _monitoring_app
 
@@ -32,13 +34,17 @@ _job_queue: asyncio.Queue = asyncio.Queue()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await storage.init_db()
-    worker = asyncio.create_task(run_worker(_job_queue))
+    tasks = [asyncio.create_task(run_worker(_job_queue))]
+    if settings.retention_days > 0:
+        tasks.append(asyncio.create_task(run_retention(settings.retention_days)))
     yield
-    worker.cancel()
-    try:
-        await worker
-    except asyncio.CancelledError:
-        pass
+    for t in tasks:
+        t.cancel()
+    for t in tasks:
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="Document Processor", version="0.1.0", lifespan=lifespan)
@@ -399,6 +405,67 @@ async def delete_webhook(webhook_id: UUID):
     deleted = await storage.delete_webhook(webhook_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Webhook not found")
+
+
+# ---------------------------------------------------------------------------
+# Document notes
+# ---------------------------------------------------------------------------
+
+class NoteBody(BaseModel):
+    note: str
+
+
+@app.put("/results/{document_id}/note", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def set_note(document_id: UUID, body: NoteBody):
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.set_note(document_id, body.note)
+
+
+@app.get("/results/{document_id}/note", dependencies=[Depends(require_api_key)])
+async def get_note(document_id: UUID):
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    note = await storage.get_note(document_id)
+    if note is None:
+        raise HTTPException(status_code=404, detail="No note set for this result")
+    return note
+
+
+@app.delete("/results/{document_id}/note", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def delete_note(document_id: UUID):
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    removed = await storage.delete_note(document_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="No note set for this result")
+
+
+# ---------------------------------------------------------------------------
+# Admin endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/admin/cleanup", dependencies=[Depends(require_api_key)])
+async def manual_cleanup(
+    older_than_days: int = Query(..., ge=1, description="Delete results older than N days"),
+):
+    """Manually trigger retention cleanup. Returns number of results deleted."""
+    deleted = await storage.cleanup_old_results(older_than_days)
+    return {"deleted": deleted, "older_than_days": older_than_days}
+
+
+@app.get("/admin/retention", dependencies=[Depends(require_api_key)])
+async def retention_config():
+    """Return current retention policy configuration."""
+    return {
+        "retention_days": settings.retention_days,
+        "active": settings.retention_days > 0,
+    }
 
 
 # ---------------------------------------------------------------------------
