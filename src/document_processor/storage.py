@@ -41,6 +41,13 @@ _DDL_TAGS = """
         PRIMARY KEY (result_id, tag)
     )
 """
+_DDL_NOTES = """
+    CREATE TABLE IF NOT EXISTS notes (
+        result_id  TEXT PRIMARY KEY,
+        note       TEXT NOT NULL,
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_WEBHOOKS = """
     CREATE TABLE IF NOT EXISTS webhooks (
         id         TEXT PRIMARY KEY,
@@ -106,6 +113,7 @@ async def init_db() -> None:
         await db.execute(_DDL_API_KEYS)
         await db.execute(_DDL_JOBS)
         await db.execute(_DDL_TAGS)
+        await db.execute(_DDL_NOTES)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -633,3 +641,75 @@ async def search_results_by_tag(
         ) as cur:
             rows = await cur.fetchall()
     return [PipelineResult.model_validate_json(r[0]) for r in rows], total
+
+
+# ---------------------------------------------------------------------------
+# Retention / cleanup
+# ---------------------------------------------------------------------------
+
+async def cleanup_old_results(older_than_days: int) -> int:
+    """Delete results (+ documents, tags, notes) older than N days. Returns count deleted."""
+    if older_than_days <= 0:
+        return 0
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.execute(_DDL_DOCUMENTS)
+        await db.execute(_DDL_TAGS)
+        await db.execute(_DDL_NOTES)
+        await db.commit()
+        cutoff = f"datetime('now', '-{int(older_than_days)} days')"
+        async with db.execute(
+            f"SELECT id FROM results WHERE created_at < strftime('%Y-%m-%dT%H:%M:%SZ', {cutoff})"
+        ) as cur:
+            ids = [r[0] for r in await cur.fetchall()]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" * len(ids))
+        for table in ("tags", "notes", "documents", "results"):
+            col = "result_id" if table in ("tags", "notes") else "id"
+            await db.execute(f"DELETE FROM {table} WHERE {col} IN ({placeholders})", ids)
+        await db.commit()
+    return len(ids)
+
+
+# ---------------------------------------------------------------------------
+# Document notes
+# ---------------------------------------------------------------------------
+
+async def set_note(result_id: UUID, note: str) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_NOTES)
+        await db.execute(
+            """INSERT INTO notes (result_id, note, updated_at)
+               VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(result_id) DO UPDATE SET
+                   note = excluded.note,
+                   updated_at = excluded.updated_at""",
+            (str(result_id), note),
+        )
+        await db.commit()
+
+
+async def get_note(result_id: UUID) -> dict | None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_NOTES)
+        await db.commit()
+        async with db.execute(
+            "SELECT note, updated_at FROM notes WHERE result_id = ?", (str(result_id),)
+        ) as cur:
+            row = await cur.fetchone()
+    return {"note": row[0], "updated_at": row[1]} if row else None
+
+
+async def delete_note(result_id: UUID) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_NOTES)
+        cursor = await db.execute(
+            "DELETE FROM notes WHERE result_id = ?", (str(result_id),)
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
