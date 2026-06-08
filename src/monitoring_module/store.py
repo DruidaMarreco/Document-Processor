@@ -42,6 +42,8 @@ class EventStore:
         self._duration_sum: float = 0.0
         self._by_module: dict[str, dict] = {}
         self._by_route: dict[str, int] = {}
+        self._by_doc_type: dict[str, int] = {}
+        self._llm_calls: int = 0
 
     async def record(self, event: PipelineEvent) -> None:
         self._events.append(event)
@@ -64,6 +66,16 @@ class EventStore:
         route = event.data.get("route")
         if route:
             self._by_route[route] = self._by_route.get(route, 0) + 1
+
+        if event.module == "classifier":
+            doc_type = event.data.get("type")
+            if doc_type:
+                self._by_doc_type[doc_type] = self._by_doc_type.get(doc_type, 0) + 1
+            if event.data.get("method") == "llm":
+                self._llm_calls += 1
+
+        if event.module == "extractor" and event.data.get("llm_enriched"):
+            self._llm_calls += 1
 
     async def _broadcast(self, event: PipelineEvent) -> None:
         dead: list[asyncio.Queue] = []
@@ -99,7 +111,9 @@ class EventStore:
             "skipped": self._totals.get("skipped", 0),
             "success_rate": round(success / total * 100, 1) if total else 0.0,
             "avg_duration_ms": round(self._duration_sum / total, 2) if total else 0.0,
+            "llm_calls": self._llm_calls,
             "by_route": dict(sorted(self._by_route.items(), key=lambda x: -x[1])),
+            "by_doc_type": dict(sorted(self._by_doc_type.items(), key=lambda x: -x[1])),
             "by_module": {
                 name: {
                     "total": s["total"],
