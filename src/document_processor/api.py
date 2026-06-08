@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
@@ -51,6 +51,10 @@ async def health():
     return {"status": "ok", "version": "0.1.0", "stored_results": n}
 
 
+# ---------------------------------------------------------------------------
+# Process endpoints
+# ---------------------------------------------------------------------------
+
 @app.post("/process", response_model=PipelineResult)
 async def process_document(file: UploadFile = File(...)):
     content = await file.read()
@@ -61,7 +65,7 @@ async def process_document(file: UploadFile = File(...)):
     )
     pipeline = registry.build_pipeline()
     result = await pipeline.run(document)
-    await storage.save_result(result)
+    await storage.save_result(result, document=document)
     return result
 
 
@@ -95,7 +99,7 @@ async def process_stream(file: UploadFile = File(...)):
                 yield ": keepalive\n\n"
 
         final = await task
-        await storage.save_result(final)
+        await storage.save_result(final, document=document)
         payload = json.dumps({"type": "done", **final.model_dump(mode="json")})
         yield f"data: {payload}\n\n"
 
@@ -108,7 +112,7 @@ async def process_stream(file: UploadFile = File(...)):
 
 @app.post("/batch")
 async def batch_process(files: list[UploadFile] = File(...)):
-    """Process multiple documents concurrently. Returns a list of results."""
+    """Process multiple documents concurrently."""
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
     if len(files) > 20:
@@ -124,14 +128,10 @@ async def batch_process(files: list[UploadFile] = File(...)):
         pipeline = registry.build_pipeline()
         try:
             result = await pipeline.run(document)
-            await storage.save_result(result)
+            await storage.save_result(result, document=document)
             return result.model_dump(mode="json")
         except Exception as exc:
-            return {
-                "filename": file.filename,
-                "status": "failed",
-                "error": str(exc),
-            }
+            return {"filename": file.filename, "status": "failed", "error": str(exc)}
 
     raw = await asyncio.gather(*[_process_one(f) for f in files], return_exceptions=True)
     return [
@@ -140,14 +140,73 @@ async def batch_process(files: list[UploadFile] = File(...)):
     ]
 
 
+# ---------------------------------------------------------------------------
+# Results endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/results")
+async def list_results(
+    doc_type: str | None = Query(None, description="Filter by document type (invoice, contract, …)"),
+    status: str | None = Query(None, description="Filter by pipeline status (success, partial, failed)"),
+    filename: str | None = Query(None, description="Partial filename match"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    results, total = await storage.search_results(
+        doc_type=doc_type, status=status, filename=filename,
+        limit=limit, offset=offset,
+    )
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "results": [r.model_dump(mode="json") for r in results],
+    }
+
+
+@app.get("/results/{document_id}/export")
+async def export_result(
+    document_id: UUID,
+    format: str = Query("json", description="Export format: json or csv"),
+):
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+
+    if format == "csv":
+        csv_content = storage.result_to_csv(result)
+        return Response(
+            content=csv_content,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{document_id}.csv"'},
+        )
+
+    return Response(
+        content=result.model_dump_json(indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{document_id}.json"'},
+    )
+
+
+@app.post("/results/{document_id}/reprocess", response_model=PipelineResult)
+async def reprocess_document(document_id: UUID):
+    """Re-run the full pipeline on the original stored document bytes."""
+    document = await storage.get_document(document_id)
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail="Original document content not found. "
+                   "Only documents uploaded via /process, /process/stream, or /batch can be reprocessed.",
+        )
+    pipeline = registry.build_pipeline()
+    result = await pipeline.run(document)
+    await storage.save_result(result, document=document)
+    return result
+
+
 @app.get("/results/{document_id}", response_model=PipelineResult)
 async def get_result(document_id: UUID):
     result = await storage.get_result(document_id)
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
     return result
-
-
-@app.get("/results", response_model=list[PipelineResult])
-async def list_results(limit: int = 100):
-    return await storage.list_results(limit=limit)
