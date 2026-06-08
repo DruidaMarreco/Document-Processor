@@ -213,6 +213,11 @@ async def list_results(
     status: str | None = Query(None, description="Filter by pipeline status (success, partial, failed)"),
     filename: str | None = Query(None, description="Partial filename match"),
     tag: str | None = Query(None, description="Filter by tag (exact, case-insensitive)"),
+    q: str | None = Query(None, description="Keyword search within extracted content"),
+    date_from: str | None = Query(None, description="ISO 8601 lower bound for created_at (inclusive)"),
+    date_to: str | None = Query(None, description="ISO 8601 upper bound for created_at (inclusive)"),
+    sort_by: str = Query("created_at", description="Sort field: created_at, doc_type, filename, pipeline_status"),
+    sort_order: str = Query("desc", description="Sort direction: asc or desc"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -221,6 +226,8 @@ async def list_results(
     else:
         results, total = await storage.search_results(
             doc_type=doc_type, status=status, filename=filename,
+            q=q, date_from=date_from, date_to=date_to,
+            sort_by=sort_by, sort_order=sort_order,
             limit=limit, offset=offset,
         )
     return {
