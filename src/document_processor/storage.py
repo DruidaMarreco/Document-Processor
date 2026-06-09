@@ -27,7 +27,8 @@ _DDL_RESULTS = """
         workflow_status TEXT,
         locked          INTEGER NOT NULL DEFAULT 0,
         starred         INTEGER NOT NULL DEFAULT 0,
-        priority        TEXT
+        priority        TEXT,
+        expires_at      TEXT
     )
 """
 _DDL_DOCUMENTS = """
@@ -201,6 +202,7 @@ _MIGRATION_COLUMNS = [
     ("locked",           "INTEGER NOT NULL DEFAULT 0"),
     ("starred",          "INTEGER NOT NULL DEFAULT 0"),
     ("priority",         "TEXT"),
+    ("expires_at",       "TEXT"),
 ]
 
 WORKFLOW_STATUSES = {"pending_review", "approved", "rejected", "archived"}
@@ -365,6 +367,7 @@ async def search_results(
     workflow_status: str | None = None,
     starred: bool | None = None,
     priority: str | None = None,
+    include_expired: bool = False,
     sort_by: str = "created_at",
     sort_order: str = "desc",
     limit: int = 50,
@@ -403,6 +406,10 @@ async def search_results(
     if priority is not None:
         conditions.append("priority = ?")
         params.append(priority)
+    if not include_expired:
+        conditions.append(
+            "(expires_at IS NULL OR expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))"
+        )
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     col = sort_by if sort_by in _SORT_COLUMNS else "created_at"
@@ -1282,6 +1289,51 @@ async def get_result_priority(result_id: UUID) -> str | None:
     if row is None:
         return None
     return row[0]
+
+
+# ---------------------------------------------------------------------------
+# Result expiry (TTL)
+# ---------------------------------------------------------------------------
+
+async def set_result_expiry(result_id: UUID, expires_at: str | None) -> bool:
+    """Set or clear the expiry timestamp (ISO 8601). Returns False if result not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        cursor = await db.execute(
+            "UPDATE results SET expires_at = ? WHERE id = ?",
+            (expires_at, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def get_result_expiry(result_id: UUID) -> str | None:
+    """Return expires_at for a result, or None if unset or result not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            "SELECT expires_at FROM results WHERE id = ?", (str(result_id),)
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return row[0]
+
+
+async def purge_expired_results() -> int:
+    """Delete all results whose expires_at is in the past. Returns count deleted."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        cursor = await db.execute(
+            "DELETE FROM results WHERE expires_at IS NOT NULL "
+            "AND expires_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+        )
+        await db.commit()
+    return cursor.rowcount or 0
 
 
 async def set_result_locked(result_id: UUID, locked: bool) -> bool:

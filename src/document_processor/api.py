@@ -291,6 +291,7 @@ async def list_results(
     workflow_status: str | None = Query(None, description="Filter by workflow status (pending_review, approved, rejected, archived)"),
     starred: bool | None = Query(None, description="Filter by star state (true=starred only, false=unstarred only)"),
     priority: str | None = Query(None, description="Filter by priority (low, medium, high, critical)"),
+    include_expired: bool = Query(False, description="Include results past their expiry date (default: excluded)"),
     sort_by: str = Query("created_at", description="Sort field: created_at, doc_type, filename, pipeline_status"),
     sort_order: str = Query("desc", description="Sort direction: asc or desc"),
     limit: int = Query(50, ge=1, le=200),
@@ -306,6 +307,7 @@ async def list_results(
             workflow_status=workflow_status,
             starred=starred,
             priority=priority,
+            include_expired=include_expired,
             sort_by=sort_by, sort_order=sort_order,
             limit=limit, offset=offset,
         )
@@ -1235,6 +1237,52 @@ async def get_result_priority(document_id: UUID):
         raise HTTPException(status_code=404, detail="Result not found")
     p = await storage.get_result_priority(document_id)
     return {"document_id": str(document_id), "priority": p}
+
+
+# ---------------------------------------------------------------------------
+# Expiry (TTL) endpoints
+# ---------------------------------------------------------------------------
+
+class ExpiryBody(BaseModel):
+    expires_at: str = Field(..., description="ISO 8601 datetime when this result expires (e.g. 2026-12-31T00:00:00Z)")
+
+
+@app.put("/results/{document_id}/expiry", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def set_result_expiry(document_id: UUID, body: ExpiryBody):
+    """Set an expiry timestamp on a result. Expired results are hidden from default listings."""
+    updated = await storage.set_result_expiry(document_id, body.expires_at)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.append_audit(document_id, "expiry_set", f"expires_at={body.expires_at}")
+
+
+@app.delete("/results/{document_id}/expiry", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def clear_result_expiry(document_id: UUID):
+    """Clear the expiry timestamp — result will no longer expire."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.set_result_expiry(document_id, None)
+    await storage.append_audit(document_id, "expiry_cleared")
+
+
+@app.get("/results/{document_id}/expiry", dependencies=[Depends(require_api_key)])
+async def get_result_expiry(document_id: UUID):
+    """Return the expiry timestamp for a result, or null if none is set."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    exp = await storage.get_result_expiry(document_id)
+    return {"document_id": str(document_id), "expires_at": exp}
+
+
+@app.post("/admin/purge-expired", dependencies=[Depends(require_api_key)])
+async def purge_expired():
+    """Delete all results that have passed their expiry timestamp. Returns count deleted."""
+    deleted = await storage.purge_expired_results()
+    return {"deleted": deleted}
 
 
 # ---------------------------------------------------------------------------
