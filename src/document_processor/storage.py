@@ -224,6 +224,15 @@ _DDL_WEBHOOK_DELIVERIES = """
         delivered_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_RESULTS_FTS = """
+    CREATE VIRTUAL TABLE IF NOT EXISTS results_fts USING fts5(
+        result_id UNINDEXED,
+        filename,
+        doc_type,
+        search_text,
+        tokenize='unicode61'
+    )
+"""
 _MIGRATION_WEBHOOKS_COLUMNS = [
     ("doc_types", "TEXT NOT NULL DEFAULT '[]'"),
 ]
@@ -318,6 +327,7 @@ async def init_db() -> None:
         await db.execute(_DDL_CHECKLIST)
         await db.execute(_DDL_BOOKMARKS)
         await db.execute(_DDL_ATTACHMENTS)
+        await db.execute(_DDL_RESULTS_FTS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -372,17 +382,47 @@ async def find_duplicate(content: bytes) -> PipelineResult | None:
     return PipelineResult.model_validate_json(row[0]) if row else None
 
 
+def _build_search_text(result: PipelineResult) -> str:
+    """Extract key text from a PipelineResult for FTS indexing."""
+    parts: list[str] = []
+    for stage in result.stages:
+        data = stage.data or {}
+        if stage.module == "generator":
+            summary = data.get("summary", "")
+            if summary:
+                parts.append(summary)
+        elif stage.module == "extractor":
+            for key, val in data.items():
+                if key == "metadata":
+                    continue
+                if isinstance(val, list):
+                    parts.extend(str(v) for v in val if v)
+                elif val:
+                    parts.append(str(val))
+    return " ".join(parts)
+
+
 async def save_result(result: PipelineResult, document: Document | None = None) -> None:
     doc_type, pipeline_status, filename = _extract_meta(result)
+    search_text = _build_search_text(result)
     _ensure_dir()
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(_DDL_RESULTS)
         await db.execute(_DDL_DOCUMENTS)
+        await db.execute(_DDL_RESULTS_FTS)
         await db.execute(
             """INSERT OR REPLACE INTO results (id, doc_type, pipeline_status, filename, data)
                VALUES (?, ?, ?, ?, ?)""",
             (str(result.document_id), doc_type, pipeline_status, filename,
              result.model_dump_json()),
+        )
+        # Keep FTS index in sync — delete old entry first (contentless table)
+        await db.execute(
+            "DELETE FROM results_fts WHERE result_id = ?", (str(result.document_id),)
+        )
+        await db.execute(
+            "INSERT INTO results_fts (result_id, filename, doc_type, search_text) VALUES (?, ?, ?, ?)",
+            (str(result.document_id), filename or "", doc_type or "", search_text),
         )
         if document is not None:
             h = _content_hash(document.content)
@@ -507,7 +547,28 @@ async def delete_result(document_id: UUID) -> None:
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute("DELETE FROM results WHERE id = ?", (str(document_id),))
         await db.execute("DELETE FROM documents WHERE id = ?", (str(document_id),))
+        await db.execute("DELETE FROM results_fts WHERE result_id = ?", (str(document_id),))
         await db.commit()
+
+
+async def fts_search(query: str, limit: int = 20, offset: int = 0) -> list[str]:
+    """Full-text search across filename, doc_type, and extracted content.
+
+    Returns a list of result_id strings ordered by relevance (BM25 rank).
+    """
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS_FTS)
+        rows = await (
+            await db.execute(
+                """SELECT result_id FROM results_fts
+                   WHERE results_fts MATCH ?
+                   ORDER BY rank
+                   LIMIT ? OFFSET ?""",
+                (query, limit, offset),
+            )
+        ).fetchall()
+    return [r[0] for r in rows]
 
 
 async def bulk_delete_results(document_ids: list[UUID]) -> int:
