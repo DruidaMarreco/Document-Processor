@@ -1255,6 +1255,15 @@ async def remove_from_collection(collection_id: str, result_id: UUID):
         raise HTTPException(status_code=404, detail="Result not in collection")
 
 
+@app.get("/collections/{collection_id}/stats", dependencies=[Depends(require_api_key)])
+async def get_collection_stats(collection_id: str):
+    """Return aggregate statistics for all results in a collection."""
+    stats = await storage.get_collection_stats(collection_id)
+    if stats is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return stats
+
+
 @app.get("/collections/{collection_id}/members", dependencies=[Depends(require_api_key)])
 async def list_collection_members(
     collection_id: str,
