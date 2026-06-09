@@ -358,6 +358,20 @@ def _diff_dicts(left: dict, right: dict) -> dict:
     }
 
 
+@app.get("/results/{document_id}/similar", dependencies=[Depends(require_api_key)])
+async def find_similar_results(
+    document_id: UUID,
+    top_n: int = Query(5, ge=1, le=50, description="Number of similar results to return"),
+    min_score: float = Query(0.0, ge=0.0, le=1.0, description="Minimum Jaccard similarity score"),
+):
+    """Find the most similar stored results based on extracted field-token overlap."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    similar = await storage.find_similar(document_id, top_n=top_n, min_score=min_score)
+    return {"document_id": str(document_id), "similar": similar}
+
+
 @app.get("/results/{document_id}/confidence", dependencies=[Depends(require_api_key)])
 async def get_field_confidence(document_id: UUID):
     """Return per-field confidence scores for a result's extracted fields."""
