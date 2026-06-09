@@ -1537,6 +1537,68 @@ async def list_collection_results(
     return [PipelineResult.model_validate_json(r[0]) for r in rows], total
 
 
+async def get_collection_stats(collection_id: str) -> dict | None:
+    """Return aggregate stats for results in a collection, or None if collection doesn't exist."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.execute(_DDL_COLLECTIONS)
+        await db.execute(_DDL_COLLECTION_MEMBERS)
+        await db.commit()
+        # Verify collection exists
+        async with db.execute(
+            "SELECT id FROM collections WHERE id = ?", (collection_id,)
+        ) as cur:
+            if not await cur.fetchone():
+                return None
+        # Totals
+        async with db.execute(
+            """SELECT
+                COUNT(*) AS total,
+                SUM(r.pinned) AS pinned,
+                SUM(r.locked) AS locked,
+                AVG(CAST(json_extract(r.data, '$.total_duration_ms') AS REAL)) AS avg_ms
+               FROM results r
+               JOIN collection_members cm ON cm.result_id = r.id
+               WHERE cm.collection_id = ?""",
+            (collection_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        total = row[0] or 0
+        pinned = int(row[1] or 0)
+        locked = int(row[2] or 0)
+        avg_ms = round(float(row[3]), 2) if row[3] is not None else None
+        # By doc_type
+        async with db.execute(
+            """SELECT r.doc_type, COUNT(*) AS cnt
+               FROM results r
+               JOIN collection_members cm ON cm.result_id = r.id
+               WHERE cm.collection_id = ?
+               GROUP BY r.doc_type ORDER BY cnt DESC""",
+            (collection_id,),
+        ) as cur:
+            by_doc_type = [{"doc_type": r[0], "count": r[1]} for r in await cur.fetchall()]
+        # By status
+        async with db.execute(
+            """SELECT r.pipeline_status, COUNT(*) AS cnt
+               FROM results r
+               JOIN collection_members cm ON cm.result_id = r.id
+               WHERE cm.collection_id = ?
+               GROUP BY r.pipeline_status ORDER BY cnt DESC""",
+            (collection_id,),
+        ) as cur:
+            by_status = [{"status": r[0], "count": r[1]} for r in await cur.fetchall()]
+    return {
+        "collection_id": collection_id,
+        "total": total,
+        "pinned": pinned,
+        "locked": locked,
+        "avg_duration_ms": avg_ms,
+        "by_doc_type": by_doc_type,
+        "by_status": by_status,
+    }
+
+
 async def append_audit(result_id: UUID | str, action: str, detail: str | None = None) -> None:
     _ensure_dir()
     async with aiosqlite.connect(_db_path()) as db:
