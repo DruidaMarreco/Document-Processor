@@ -620,6 +620,52 @@ async def bulk_tag_results(body: BulkTagBody):
     return {"updated": updated, "requested": len(body.ids)}
 
 
+class BulkReprocessBody(BaseModel):
+    ids: list[UUID]
+
+
+@app.post("/results/bulk-reprocess", dependencies=[Depends(require_api_key)])
+async def bulk_reprocess_results(body: BulkReprocessBody, background_tasks: BackgroundTasks = BackgroundTasks()):
+    """Re-run the pipeline on up to 20 documents concurrently.
+
+    Returns a per-document summary with status (success/skipped/error).
+    Documents without stored bytes or that are locked are skipped.
+    """
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="ids must not be empty")
+    if len(body.ids) > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 ids per request")
+
+    async def _reprocess_one(doc_id: UUID) -> dict:
+        try:
+            document = await storage.get_document(doc_id)
+            if not document:
+                return {"id": str(doc_id), "status": "skipped", "reason": "no_document"}
+            if await storage.is_result_locked(doc_id):
+                return {"id": str(doc_id), "status": "skipped", "reason": "locked"}
+            pipeline = registry.build_pipeline()
+            result = await pipeline.run(document)
+            await storage.save_result(result, document=document)
+            await storage.append_audit(doc_id, "reprocessed", f"status={result.status}")
+            background_tasks.add_task(_notify_webhooks, "document.reprocessed", result)
+            return {"id": str(doc_id), "status": "success", "pipeline_status": result.status}
+        except Exception as exc:
+            return {"id": str(doc_id), "status": "error", "reason": str(exc)}
+
+    results = await asyncio.gather(*[_reprocess_one(doc_id) for doc_id in body.ids])
+    summary = [r for r in results]
+    succeeded = sum(1 for r in summary if r["status"] == "success")
+    skipped = sum(1 for r in summary if r["status"] == "skipped")
+    errored = sum(1 for r in summary if r["status"] == "error")
+    return {
+        "requested": len(body.ids),
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "errored": errored,
+        "results": summary,
+    }
+
+
 class BatchExportBody(BaseModel):
     ids: list[UUID]
     format: str = "json"
