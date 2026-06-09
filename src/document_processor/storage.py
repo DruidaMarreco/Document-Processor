@@ -26,7 +26,8 @@ _DDL_RESULTS = """
         pinned          INTEGER NOT NULL DEFAULT 0,
         workflow_status TEXT,
         locked          INTEGER NOT NULL DEFAULT 0,
-        starred         INTEGER NOT NULL DEFAULT 0
+        starred         INTEGER NOT NULL DEFAULT 0,
+        priority        TEXT
     )
 """
 _DDL_DOCUMENTS = """
@@ -199,9 +200,11 @@ _MIGRATION_COLUMNS = [
     ("workflow_status",  "TEXT"),
     ("locked",           "INTEGER NOT NULL DEFAULT 0"),
     ("starred",          "INTEGER NOT NULL DEFAULT 0"),
+    ("priority",         "TEXT"),
 ]
 
 WORKFLOW_STATUSES = {"pending_review", "approved", "rejected", "archived"}
+PRIORITY_LEVELS = {"low", "medium", "high", "critical"}
 _MIGRATION_DOCUMENTS_COLUMNS = [
     ("content_hash", "TEXT"),
 ]
@@ -361,6 +364,7 @@ async def search_results(
     pinned: bool | None = None,
     workflow_status: str | None = None,
     starred: bool | None = None,
+    priority: str | None = None,
     sort_by: str = "created_at",
     sort_order: str = "desc",
     limit: int = 50,
@@ -396,6 +400,9 @@ async def search_results(
     if starred is not None:
         conditions.append("starred = ?")
         params.append(1 if starred else 0)
+    if priority is not None:
+        conditions.append("priority = ?")
+        params.append(priority)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     col = sort_by if sort_by in _SORT_COLUMNS else "created_at"
@@ -1243,6 +1250,38 @@ async def is_starred(result_id: UUID) -> bool | None:
         ) as cur:
             row = await cur.fetchone()
     return bool(row[0]) if row is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Result priority
+# ---------------------------------------------------------------------------
+
+async def set_result_priority(result_id: UUID, priority: str | None) -> bool:
+    """Set or clear priority. Returns False if result not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        cursor = await db.execute(
+            "UPDATE results SET priority = ? WHERE id = ?",
+            (priority, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def get_result_priority(result_id: UUID) -> str | None:
+    """Return priority, or None if unset or result not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            "SELECT priority FROM results WHERE id = ?", (str(result_id),)
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return row[0]
 
 
 async def set_result_locked(result_id: UUID, locked: bool) -> bool:

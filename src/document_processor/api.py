@@ -290,6 +290,7 @@ async def list_results(
     pinned: bool | None = Query(None, description="Filter by pin state (true=pinned only, false=unpinned only)"),
     workflow_status: str | None = Query(None, description="Filter by workflow status (pending_review, approved, rejected, archived)"),
     starred: bool | None = Query(None, description="Filter by star state (true=starred only, false=unstarred only)"),
+    priority: str | None = Query(None, description="Filter by priority (low, medium, high, critical)"),
     sort_by: str = Query("created_at", description="Sort field: created_at, doc_type, filename, pipeline_status"),
     sort_order: str = Query("desc", description="Sort direction: asc or desc"),
     limit: int = Query(50, ge=1, le=200),
@@ -304,6 +305,7 @@ async def list_results(
             pinned=pinned,
             workflow_status=workflow_status,
             starred=starred,
+            priority=priority,
             sort_by=sort_by, sort_order=sort_order,
             limit=limit, offset=offset,
         )
@@ -1189,6 +1191,50 @@ async def get_star_state(document_id: UUID):
     if state is None:
         raise HTTPException(status_code=404, detail="Result not found")
     return {"starred": state}
+
+
+# ---------------------------------------------------------------------------
+# Priority endpoints
+# ---------------------------------------------------------------------------
+
+class PriorityBody(BaseModel):
+    priority: str = Field(..., description="Priority level: low, medium, high, or critical")
+
+
+@app.put("/results/{document_id}/priority", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def set_result_priority(document_id: UUID, body: PriorityBody):
+    """Set the priority of a result (low, medium, high, critical)."""
+    if body.priority not in storage.PRIORITY_LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid priority. Must be one of: {', '.join(sorted(storage.PRIORITY_LEVELS))}",
+        )
+    updated = await storage.set_result_priority(document_id, body.priority)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.append_audit(document_id, "priority_set", f"priority={body.priority}")
+
+
+@app.delete("/results/{document_id}/priority", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def clear_result_priority(document_id: UUID):
+    """Clear the priority of a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.set_result_priority(document_id, None)
+    await storage.append_audit(document_id, "priority_cleared")
+
+
+@app.get("/results/{document_id}/priority", dependencies=[Depends(require_api_key)])
+async def get_result_priority(document_id: UUID):
+    """Return the priority of a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    p = await storage.get_result_priority(document_id)
+    return {"document_id": str(document_id), "priority": p}
 
 
 # ---------------------------------------------------------------------------
