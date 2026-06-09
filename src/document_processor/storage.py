@@ -886,6 +886,75 @@ async def is_pinned(result_id: UUID) -> bool | None:
 
 
 # ---------------------------------------------------------------------------
+# Similarity search
+# ---------------------------------------------------------------------------
+
+def _field_tokens(result: PipelineResult) -> set[str]:
+    """Extract a flat set of normalised tokens from a result's extracted fields."""
+    tokens: set[str] = set()
+    for stage in result.stages:
+        if stage.module in ("refiner", "extractor"):
+            for values in (stage.data.get("fields") or {}).values():
+                if isinstance(values, list):
+                    for v in values:
+                        tokens.update(str(v).lower().split())
+                elif values:
+                    tokens.update(str(values).lower().split())
+    return tokens
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a and not b:
+        return 1.0
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
+
+
+async def find_similar(
+    reference_id: UUID,
+    top_n: int = 5,
+    min_score: float = 0.0,
+) -> list[dict]:
+    """Return up to top_n results most similar to reference_id by field-token Jaccard."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            "SELECT id, data FROM results WHERE id != ?", (str(reference_id),)
+        ) as cur:
+            rows = await cur.fetchall()
+        async with db.execute(
+            "SELECT data FROM results WHERE id = ?", (str(reference_id),)
+        ) as cur:
+            ref_row = await cur.fetchone()
+
+    if not ref_row:
+        return []
+
+    ref = PipelineResult.model_validate_json(ref_row[0])
+    ref_tokens = _field_tokens(ref)
+
+    scored: list[tuple[float, str, str]] = []
+    for row_id, row_data in rows:
+        candidate = PipelineResult.model_validate_json(row_data)
+        score = _jaccard(ref_tokens, _field_tokens(candidate))
+        if score >= min_score:
+            scored.append((score, row_id, row_data))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    return [
+        {
+            "document_id": item[1],
+            "score": round(item[0], 4),
+            "result": PipelineResult.model_validate_json(item[2]).model_dump(mode="json"),
+        }
+        for item in scored[:top_n]
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
 
