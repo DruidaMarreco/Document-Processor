@@ -707,6 +707,24 @@ async def delete_webhook(webhook_id: UUID):
         raise HTTPException(status_code=404, detail="Webhook not found")
 
 
+@app.post("/webhooks/{webhook_id}/pause", status_code=204,
+          dependencies=[Depends(require_api_key)])
+async def pause_webhook(webhook_id: UUID):
+    """Pause a webhook — deliveries are suspended until resumed."""
+    updated = await storage.set_webhook_active(webhook_id, False)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+
+@app.post("/webhooks/{webhook_id}/resume", status_code=204,
+          dependencies=[Depends(require_api_key)])
+async def resume_webhook(webhook_id: UUID):
+    """Resume a paused webhook."""
+    updated = await storage.set_webhook_active(webhook_id, True)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+
 @app.get("/webhooks/{webhook_id}/deliveries", dependencies=[Depends(require_api_key)])
 async def list_webhook_deliveries(
     webhook_id: UUID,

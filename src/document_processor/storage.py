@@ -521,6 +521,19 @@ async def delete_webhook(webhook_id: UUID) -> bool:
     return (cursor.rowcount or 0) > 0
 
 
+async def set_webhook_active(webhook_id: UUID, active: bool) -> bool:
+    """Set active=True (resume) or active=False (pause). Returns False if not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOKS)
+        cursor = await db.execute(
+            "UPDATE webhooks SET active = ? WHERE id = ?",
+            (int(active), str(webhook_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
 # ---------------------------------------------------------------------------
 # Aggregate statistics
 # ---------------------------------------------------------------------------
