@@ -106,6 +106,19 @@ _DDL_WEBHOOKS = """
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_WEBHOOK_DELIVERIES = """
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        webhook_id  TEXT NOT NULL,
+        event       TEXT NOT NULL,
+        document_id TEXT,
+        attempt     INTEGER NOT NULL DEFAULT 1,
+        status_code INTEGER,
+        success     INTEGER NOT NULL DEFAULT 0,
+        error       TEXT,
+        delivered_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _MIGRATION_WEBHOOKS_COLUMNS = [
     ("doc_types", "TEXT NOT NULL DEFAULT '[]'"),
 ]
@@ -171,6 +184,7 @@ async def init_db() -> None:
         await db.execute(_DDL_TEMPLATES)
         await db.execute(_DDL_COLLECTIONS)
         await db.execute(_DDL_COLLECTION_MEMBERS)
+        await db.execute(_DDL_WEBHOOK_DELIVERIES)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -1290,3 +1304,91 @@ async def get_audit_log(result_id: UUID, limit: int = 100) -> list[dict]:
         {"id": r[0], "action": r[1], "detail": r[2], "created_at": r[3]}
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Webhook delivery log
+# ---------------------------------------------------------------------------
+
+async def log_webhook_delivery(
+    webhook_id: str,
+    event: str,
+    document_id: str | None,
+    attempt: int,
+    status_code: int | None,
+    success: bool,
+    error: str | None = None,
+) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOK_DELIVERIES)
+        await db.execute(
+            """INSERT INTO webhook_deliveries
+               (webhook_id, event, document_id, attempt, status_code, success, error)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (webhook_id, event, document_id, attempt, status_code, int(success), error),
+        )
+        await db.commit()
+
+
+async def get_webhook_deliveries(
+    webhook_id: str, limit: int = 50, offset: int = 0
+) -> tuple[list[dict], int]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOK_DELIVERIES)
+        await db.commit()
+        async with db.execute(
+            "SELECT COUNT(*) FROM webhook_deliveries WHERE webhook_id = ?", (webhook_id,)
+        ) as cur:
+            total: int = (await cur.fetchone())[0]  # type: ignore[index]
+        async with db.execute(
+            """SELECT id, webhook_id, event, document_id, attempt, status_code, success, error, delivered_at
+               FROM webhook_deliveries WHERE webhook_id = ?
+               ORDER BY id DESC LIMIT ? OFFSET ?""",
+            (webhook_id, limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {
+            "id": r[0],
+            "webhook_id": r[1],
+            "event": r[2],
+            "document_id": r[3],
+            "attempt": r[4],
+            "status_code": r[5],
+            "success": bool(r[6]),
+            "error": r[7],
+            "delivered_at": r[8],
+        }
+        for r in rows
+    ], total
+
+
+async def get_webhook_delivery_stats(webhook_id: str) -> dict:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOK_DELIVERIES)
+        await db.commit()
+        async with db.execute(
+            """SELECT
+                COUNT(*) AS total,
+                SUM(success) AS successes,
+                COUNT(*) - SUM(success) AS failures,
+                AVG(attempt) AS avg_attempts
+               FROM webhook_deliveries WHERE webhook_id = ?""",
+            (webhook_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    total = row[0] or 0
+    successes = int(row[1] or 0)
+    failures = int(row[2] or 0)
+    avg_attempts = round(float(row[3] or 0), 2)
+    success_rate = round(successes / total, 4) if total else 0.0
+    return {
+        "total": total,
+        "successes": successes,
+        "failures": failures,
+        "success_rate": success_rate,
+        "avg_attempts": avg_attempts,
+    }

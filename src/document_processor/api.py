@@ -602,6 +602,33 @@ async def delete_webhook(webhook_id: UUID):
         raise HTTPException(status_code=404, detail="Webhook not found")
 
 
+@app.get("/webhooks/{webhook_id}/deliveries", dependencies=[Depends(require_api_key)])
+async def list_webhook_deliveries(
+    webhook_id: UUID,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """Return paginated delivery log for a webhook."""
+    whs = await storage.list_webhooks()
+    if not any(str(wh.id) == str(webhook_id) for wh in whs):
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    deliveries, total = await storage.get_webhook_deliveries(
+        str(webhook_id), limit=limit, offset=offset
+    )
+    return {"webhook_id": str(webhook_id), "total": total, "offset": offset,
+            "limit": limit, "deliveries": deliveries}
+
+
+@app.get("/webhooks/{webhook_id}/deliveries/stats", dependencies=[Depends(require_api_key)])
+async def webhook_delivery_stats(webhook_id: UUID):
+    """Return aggregate delivery statistics for a webhook."""
+    whs = await storage.list_webhooks()
+    if not any(str(wh.id) == str(webhook_id) for wh in whs):
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    stats = await storage.get_webhook_delivery_stats(str(webhook_id))
+    return {"webhook_id": str(webhook_id), **stats}
+
+
 # ---------------------------------------------------------------------------
 # Document notes
 # ---------------------------------------------------------------------------
