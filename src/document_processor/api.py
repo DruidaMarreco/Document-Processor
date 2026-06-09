@@ -243,6 +243,26 @@ async def results_stats():
     return await storage.get_stats()
 
 
+@app.get("/results/stats/timeline", dependencies=[Depends(require_api_key)])
+async def results_stats_timeline(
+    days: int = Query(30, ge=1, le=365, description="Number of past days to include"),
+):
+    """Return daily document counts for the last N days (newest first)."""
+    return {"days": days, "timeline": await storage.get_stats_timeline(days=days)}
+
+
+@app.get("/results/stats/stage-timing", dependencies=[Depends(require_api_key)])
+async def results_stats_stage_timing():
+    """Return per-stage timing stats (avg, min, max, p50, p95) across all results."""
+    return {"stages": await storage.get_stats_stage_timing()}
+
+
+@app.get("/results/stats/error-rates", dependencies=[Depends(require_api_key)])
+async def results_stats_error_rates():
+    """Return per-doc_type success/failure counts and error rate."""
+    return {"error_rates": await storage.get_stats_error_rates()}
+
+
 @app.get("/results", dependencies=[Depends(require_api_key)])
 async def list_results(
     doc_type: str | None = Query(None, description="Filter by document type (invoice, contract, …)"),

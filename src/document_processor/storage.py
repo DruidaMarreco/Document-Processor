@@ -1747,3 +1747,92 @@ async def delete_metadata_key(result_id: UUID, key: str) -> bool:
         )
         await db.commit()
     return (cursor.rowcount or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Enhanced statistics
+# ---------------------------------------------------------------------------
+
+async def get_stats_timeline(days: int = 30) -> list[dict]:
+    """Return document count per day for the last N days (newest first)."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            """SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count
+               FROM results
+               WHERE created_at >= strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', ?))
+               GROUP BY day
+               ORDER BY day DESC""",
+            (f"-{days} days",),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"date": r[0], "count": r[1]} for r in rows]
+
+
+async def get_stats_stage_timing() -> list[dict]:
+    """Return per-module timing stats (avg, min, max duration_ms) computed from stored JSON."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        # Extract stage data via JSON functions — stages is a JSON array
+        async with db.execute("SELECT data FROM results") as cur:
+            rows = await cur.fetchall()
+
+    module_times: dict[str, list[float]] = {}
+    for (raw,) in rows:
+        try:
+            result = json.loads(raw)
+            for stage in result.get("stages", []):
+                mod = stage.get("module")
+                dur = stage.get("duration_ms")
+                if mod and isinstance(dur, (int, float)):
+                    module_times.setdefault(mod, []).append(float(dur))
+        except Exception:
+            pass
+
+    out = []
+    for module, times in sorted(module_times.items()):
+        times_sorted = sorted(times)
+        n = len(times_sorted)
+        out.append({
+            "module": module,
+            "count": n,
+            "avg_ms": round(sum(times_sorted) / n, 2),
+            "min_ms": round(times_sorted[0], 2),
+            "max_ms": round(times_sorted[-1], 2),
+            "p50_ms": round(times_sorted[n // 2], 2),
+            "p95_ms": round(times_sorted[min(int(n * 0.95), n - 1)], 2),
+        })
+    return out
+
+
+async def get_stats_error_rates() -> list[dict]:
+    """Return per-doc_type success/failure counts and error rate."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            """SELECT
+                doc_type,
+                COUNT(*) AS total,
+                SUM(CASE WHEN pipeline_status = 'success' THEN 1 ELSE 0 END) AS successes,
+                SUM(CASE WHEN pipeline_status != 'success' THEN 1 ELSE 0 END) AS failures
+               FROM results
+               GROUP BY doc_type
+               ORDER BY total DESC"""
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {
+            "doc_type": r[0] or "unknown",
+            "total": r[1],
+            "successes": r[2],
+            "failures": r[3],
+            "error_rate": round(r[3] / r[1], 4) if r[1] else 0.0,
+        }
+        for r in rows
+    ]
