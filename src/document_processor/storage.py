@@ -579,6 +579,150 @@ def result_to_csv(result: PipelineResult) -> str:
     return buf.getvalue()
 
 
+def result_to_markdown(result: PipelineResult) -> str:
+    """Render a PipelineResult as a Markdown report."""
+    extractor_data: dict = {}
+    classifier_data: dict = {}
+    validator_data: dict = {}
+    for stage in result.stages:
+        if stage.module == "extractor":
+            extractor_data = stage.data
+        elif stage.module == "classifier":
+            classifier_data = stage.data
+        elif stage.module == "validator":
+            validator_data = stage.data
+
+    fields = extractor_data.get("fields", {})
+    meta = extractor_data.get("metadata", {})
+    filename = meta.get("filename", "—")
+    doc_type = classifier_data.get("type", "—")
+    confidence = classifier_data.get("confidence", "—")
+    method = classifier_data.get("method", "—")
+    violations = validator_data.get("violations", [])
+    warnings = validator_data.get("warnings", [])
+
+    lines = [
+        f"# Document Report",
+        "",
+        f"| Field | Value |",
+        f"|---|---|",
+        f"| Document ID | `{result.document_id}` |",
+        f"| Filename | {filename} |",
+        f"| Status | {result.status} |",
+        f"| Duration | {result.total_duration_ms:.1f} ms |",
+        "",
+        f"## Classification",
+        "",
+        f"| Field | Value |",
+        f"|---|---|",
+        f"| Type | {doc_type} |",
+        f"| Confidence | {confidence} |",
+        f"| Method | {method} |",
+    ]
+
+    if fields:
+        lines += ["", "## Extracted Fields", "", "| Field | Value |", "|---|---|"]
+        for name, values in fields.items():
+            display = "; ".join(str(v) for v in values) if isinstance(values, list) else str(values)
+            lines.append(f"| {name} | {display} |")
+
+    if violations:
+        lines += ["", "## Violations", ""]
+        for v in violations:
+            lines.append(f"- {v}")
+
+    if warnings:
+        lines += ["", "## Warnings", ""]
+        for w in warnings:
+            lines.append(f"- {w}")
+
+    lines += ["", "## Stages", ""]
+    for stage in result.stages:
+        lines.append(f"### {stage.module} ({stage.status}, {stage.duration_ms:.1f} ms)")
+        if stage.errors:
+            for e in stage.errors:
+                lines.append(f"- Error: {e}")
+
+    return "\n".join(lines) + "\n"
+
+
+def _xml_escape(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+             .replace("<", "&lt;")
+             .replace(">", "&gt;")
+             .replace('"', "&quot;")
+             .replace("'", "&apos;")
+    )
+
+
+def result_to_xml(result: PipelineResult) -> str:
+    """Render a PipelineResult as an XML document."""
+    extractor_data: dict = {}
+    classifier_data: dict = {}
+    validator_data: dict = {}
+    for stage in result.stages:
+        if stage.module == "extractor":
+            extractor_data = stage.data
+        elif stage.module == "classifier":
+            classifier_data = stage.data
+        elif stage.module == "validator":
+            validator_data = stage.data
+
+    fields = extractor_data.get("fields", {})
+    meta = extractor_data.get("metadata", {})
+    violations = validator_data.get("violations", [])
+    warnings = validator_data.get("warnings", [])
+
+    def tag(name: str, value: object, indent: int = 2) -> str:
+        pad = " " * indent
+        s = _xml_escape(str(value)) if value is not None else ""
+        return f"{pad}<{name}>{s}</{name}>"
+
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<result>"]
+    lines.append(tag("document_id", result.document_id))
+    lines.append(tag("filename", meta.get("filename", "")))
+    lines.append(tag("status", result.status))
+    lines.append(tag("total_duration_ms", result.total_duration_ms))
+
+    lines.append("  <classification>")
+    lines.append(tag("type", classifier_data.get("type", ""), 4))
+    lines.append(tag("confidence", classifier_data.get("confidence", ""), 4))
+    lines.append(tag("method", classifier_data.get("method", ""), 4))
+    lines.append("  </classification>")
+
+    if fields:
+        lines.append("  <fields>")
+        for name, values in fields.items():
+            display = "; ".join(str(v) for v in values) if isinstance(values, list) else str(values)
+            lines.append(f"    <{name}>{_xml_escape(display)}</{name}>")
+        lines.append("  </fields>")
+
+    if violations:
+        lines.append("  <violations>")
+        for v in violations:
+            lines.append(tag("violation", v, 4))
+        lines.append("  </violations>")
+
+    if warnings:
+        lines.append("  <warnings>")
+        for w in warnings:
+            lines.append(tag("warning", w, 4))
+        lines.append("  </warnings>")
+
+    lines.append("  <stages>")
+    for stage in result.stages:
+        lines.append("    <stage>")
+        lines.append(tag("module", stage.module, 6))
+        lines.append(tag("status", stage.status, 6))
+        lines.append(tag("duration_ms", stage.duration_ms, 6))
+        lines.append("    </stage>")
+    lines.append("  </stages>")
+
+    lines.append("</result>")
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # API key persistence
 # ---------------------------------------------------------------------------
