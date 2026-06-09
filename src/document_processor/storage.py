@@ -52,6 +52,15 @@ _DDL_NOTES = """
         updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_SNAPSHOTS = """
+    CREATE TABLE IF NOT EXISTS result_snapshots (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_id  TEXT NOT NULL,
+        label      TEXT,
+        data       TEXT NOT NULL,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_RELATIONS = """
     CREATE TABLE IF NOT EXISTS result_relations (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -221,6 +230,7 @@ async def init_db() -> None:
         await db.execute(_DDL_WEBHOOK_DELIVERIES)
         await db.execute(_DDL_COMMENTS)
         await db.execute(_DDL_METADATA)
+        await db.execute(_DDL_SNAPSHOTS)
         await db.execute(_DDL_RELATIONS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
@@ -2012,6 +2022,77 @@ async def get_stats_error_rates() -> list[dict]:
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Result snapshots
+# ---------------------------------------------------------------------------
+
+async def create_snapshot(result_id: UUID, label: str | None = None) -> dict | None:
+    """Save a snapshot of the current result data. Returns None if result doesn't exist."""
+    _ensure_dir()
+    result = await get_result(result_id)
+    if result is None:
+        return None
+    data_json = result.model_dump_json()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_SNAPSHOTS)
+        cursor = await db.execute(
+            "INSERT INTO result_snapshots (result_id, label, data) VALUES (?, ?, ?)",
+            (str(result_id), label, data_json),
+        )
+        snap_id = cursor.lastrowid
+        await db.commit()
+        async with db.execute(
+            "SELECT id, result_id, label, created_at FROM result_snapshots WHERE id = ?",
+            (snap_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return {
+        "id": row[0],
+        "result_id": row[1],
+        "label": row[2],
+        "created_at": row[3],
+    }
+
+
+async def list_snapshots(result_id: UUID) -> list[dict]:
+    """Return all snapshots for a result, newest first (without inline data)."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_SNAPSHOTS)
+        await db.commit()
+        async with db.execute(
+            """SELECT id, result_id, label, created_at
+               FROM result_snapshots WHERE result_id = ?
+               ORDER BY id DESC""",
+            (str(result_id),),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"id": r[0], "result_id": r[1], "label": r[2], "created_at": r[3]} for r in rows]
+
+
+async def get_snapshot(result_id: UUID, snapshot_id: int) -> dict | None:
+    """Fetch a single snapshot (including full data). Returns None if not found or wrong result."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_SNAPSHOTS)
+        await db.commit()
+        async with db.execute(
+            """SELECT id, result_id, label, data, created_at
+               FROM result_snapshots WHERE id = ? AND result_id = ?""",
+            (snapshot_id, str(result_id)),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "result_id": row[1],
+        "label": row[2],
+        "data": json.loads(row[3]),
+        "created_at": row[4],
+    }
 
 
 # ---------------------------------------------------------------------------

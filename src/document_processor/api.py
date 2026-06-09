@@ -374,6 +374,41 @@ async def reprocess_document(document_id: UUID, background_tasks: BackgroundTask
     return result
 
 
+class SnapshotBody(BaseModel):
+    label: str | None = None
+
+
+@app.post("/results/{document_id}/snapshots", status_code=201,
+          dependencies=[Depends(require_api_key)])
+async def create_snapshot(document_id: UUID, body: SnapshotBody = SnapshotBody()):
+    """Save a point-in-time snapshot of the current result."""
+    snap = await storage.create_snapshot(document_id, label=body.label)
+    if snap is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.append_audit(document_id, "snapshot_created", f"snapshot_id={snap['id']}")
+    return snap
+
+
+@app.get("/results/{document_id}/snapshots", dependencies=[Depends(require_api_key)])
+async def list_snapshots(document_id: UUID):
+    """List all snapshots for a result (without inline data, newest first)."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    snaps = await storage.list_snapshots(document_id)
+    return {"document_id": str(document_id), "snapshots": snaps}
+
+
+@app.get("/results/{document_id}/snapshots/{snapshot_id}",
+         dependencies=[Depends(require_api_key)])
+async def get_snapshot(document_id: UUID, snapshot_id: int):
+    """Fetch a single snapshot (includes full result data at the time of snapshot)."""
+    snap = await storage.get_snapshot(document_id, snapshot_id)
+    if snap is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return snap
+
+
 @app.get("/results/{document_id}", response_model=PipelineResult,
          dependencies=[Depends(require_api_key)])
 async def get_result(document_id: UUID):
