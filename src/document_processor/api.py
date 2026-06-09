@@ -421,6 +421,7 @@ async def get_result(document_id: UUID):
     result = await storage.get_result(document_id)
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
+    await storage.record_result_access(document_id)
     return result
 
 
@@ -1334,6 +1335,34 @@ async def get_audit_log(
         raise HTTPException(status_code=404, detail="Result not found")
     entries = await storage.get_audit_log(document_id, limit=limit)
     return {"document_id": str(document_id), "entries": entries}
+
+
+# ---------------------------------------------------------------------------
+# Access log endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/results/{document_id}/access-log", dependencies=[Depends(require_api_key)])
+async def get_access_log(
+    document_id: UUID,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+):
+    """Return the access log (GET fetches) for a result, newest first."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    entries, total = await storage.get_result_access_log(document_id, limit=limit, offset=offset)
+    return {"document_id": str(document_id), "total": total, "entries": entries}
+
+
+@app.get("/results/{document_id}/access-count", dependencies=[Depends(require_api_key)])
+async def get_access_count(document_id: UUID):
+    """Return the total number of times a result has been fetched."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    count = await storage.get_result_access_count(document_id)
+    return {"document_id": str(document_id), "access_count": count}
 
 
 # ---------------------------------------------------------------------------
