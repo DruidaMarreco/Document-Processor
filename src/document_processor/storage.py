@@ -83,6 +83,22 @@ _DDL_METADATA = """
         PRIMARY KEY (result_id, key)
     )
 """
+_DDL_LABELS = """
+    CREATE TABLE IF NOT EXISTS labels (
+        name        TEXT PRIMARY KEY,
+        color       TEXT NOT NULL DEFAULT '#888888',
+        description TEXT,
+        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
+_DDL_RESULT_LABELS = """
+    CREATE TABLE IF NOT EXISTS result_labels (
+        result_id  TEXT NOT NULL,
+        label_name TEXT NOT NULL,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (result_id, label_name)
+    )
+"""
 _DDL_COMMENTS = """
     CREATE TABLE IF NOT EXISTS result_comments (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -255,6 +271,8 @@ async def init_db() -> None:
         await db.execute(_DDL_SNAPSHOTS)
         await db.execute(_DDL_RELATIONS)
         await db.execute(_DDL_API_KEY_QUOTAS)
+        await db.execute(_DDL_LABELS)
+        await db.execute(_DDL_RESULT_LABELS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -2061,6 +2079,133 @@ async def get_global_webhook_stats() -> dict:
         "by_event": by_event,
         "top_failing_webhooks": top_failing,
     }
+
+
+# ---------------------------------------------------------------------------
+# Labels
+# ---------------------------------------------------------------------------
+
+async def create_label(name: str, color: str = "#888888", description: str | None = None) -> dict:
+    """Create a label. Returns the created label or raises if name already exists."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_LABELS)
+        await db.execute(
+            "INSERT INTO labels (name, color, description) VALUES (?, ?, ?)",
+            (name, color, description),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT name, color, description, created_at FROM labels WHERE name = ?",
+            (name,),
+        ) as cur:
+            row = await cur.fetchone()
+    return {"name": row[0], "color": row[1], "description": row[2], "created_at": row[3]}
+
+
+async def list_labels() -> list[dict]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_LABELS)
+        await db.commit()
+        async with db.execute(
+            "SELECT name, color, description, created_at FROM labels ORDER BY name"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"name": r[0], "color": r[1], "description": r[2], "created_at": r[3]} for r in rows]
+
+
+async def delete_label(name: str) -> bool:
+    """Delete a label and all its result assignments. Returns False if label not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_LABELS)
+        await db.execute(_DDL_RESULT_LABELS)
+        cursor = await db.execute("DELETE FROM labels WHERE name = ?", (name,))
+        if (cursor.rowcount or 0) == 0:
+            return False
+        await db.execute("DELETE FROM result_labels WHERE label_name = ?", (name,))
+        await db.commit()
+    return True
+
+
+async def get_label(name: str) -> dict | None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_LABELS)
+        await db.commit()
+        async with db.execute(
+            "SELECT name, color, description, created_at FROM labels WHERE name = ?", (name,)
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return {"name": row[0], "color": row[1], "description": row[2], "created_at": row[3]}
+
+
+async def apply_label(result_id: UUID, label_name: str) -> None:
+    """Apply a label to a result (idempotent)."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULT_LABELS)
+        await db.execute(
+            "INSERT OR IGNORE INTO result_labels (result_id, label_name) VALUES (?, ?)",
+            (str(result_id), label_name),
+        )
+        await db.commit()
+
+
+async def remove_label_from_result(result_id: UUID, label_name: str) -> bool:
+    """Remove a label from a result. Returns False if assignment did not exist."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULT_LABELS)
+        cursor = await db.execute(
+            "DELETE FROM result_labels WHERE result_id = ? AND label_name = ?",
+            (str(result_id), label_name),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def get_result_labels(result_id: UUID) -> list[dict]:
+    """Return all labels applied to a result, with their colors."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_LABELS)
+        await db.execute(_DDL_RESULT_LABELS)
+        await db.commit()
+        async with db.execute(
+            """SELECT l.name, l.color, l.description
+               FROM result_labels rl JOIN labels l ON rl.label_name = l.name
+               WHERE rl.result_id = ? ORDER BY l.name""",
+            (str(result_id),),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"name": r[0], "color": r[1], "description": r[2]} for r in rows]
+
+
+async def search_results_by_label(label_name: str, limit: int = 50, offset: int = 0) -> tuple[list, int]:
+    """Return results tagged with a given label."""
+    from document_processor.models import PipelineResult
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.execute(_DDL_RESULT_LABELS)
+        await db.commit()
+        async with db.execute(
+            "SELECT COUNT(*) FROM result_labels WHERE label_name = ?", (label_name,)
+        ) as cur:
+            total: int = (await cur.fetchone())[0]  # type: ignore[index]
+        async with db.execute(
+            """SELECT r.data FROM results r
+               JOIN result_labels rl ON r.id = rl.result_id
+               WHERE rl.label_name = ?
+               ORDER BY r.created_at DESC LIMIT ? OFFSET ?""",
+            (label_name, limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [PipelineResult.model_validate_json(r[0]) for r in rows], total
 
 
 # ---------------------------------------------------------------------------
