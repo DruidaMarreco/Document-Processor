@@ -29,7 +29,9 @@ except Exception:
 # Doc types where LLM extraction adds meaningful value beyond regex
 _LLM_ENRICHED_TYPES = {
     "invoice", "receipt", "purchase_order", "contract",
-    "statement", "report", "specification", "letter",
+    "statement", "bank_statement", "report", "specification", "letter",
+    "nda", "tax_document", "payslip", "insurance", "medical_record",
+    "quote", "delivery_note", "form", "resume",
 }
 
 _llm: object = None
