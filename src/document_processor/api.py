@@ -1412,6 +1412,45 @@ async def get_result_priority(document_id: UUID):
 
 
 # ---------------------------------------------------------------------------
+# Rating endpoints
+# ---------------------------------------------------------------------------
+
+class RatingBody(BaseModel):
+    rating: int = Field(..., ge=1, le=5, description="Integer rating from 1 (lowest) to 5 (highest)")
+
+
+@app.put("/results/{document_id}/rating", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def set_result_rating(document_id: UUID, body: RatingBody):
+    """Assign a 1–5 rating to a result."""
+    updated = await storage.set_result_rating(document_id, body.rating)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.append_audit(document_id, "rating_set", f"rating={body.rating}")
+
+
+@app.delete("/results/{document_id}/rating", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def delete_result_rating(document_id: UUID):
+    """Remove the rating from a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.delete_result_rating(document_id)
+    await storage.append_audit(document_id, "rating_cleared", None)
+
+
+@app.get("/results/{document_id}/rating", dependencies=[Depends(require_api_key)])
+async def get_result_rating(document_id: UUID):
+    """Return the current rating of a result, or null if unrated."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    rating = await storage.get_result_rating(document_id)
+    return {"document_id": str(document_id), "rating": rating}
+
+
+# ---------------------------------------------------------------------------
 # Expiry (TTL) endpoints
 # ---------------------------------------------------------------------------
 
