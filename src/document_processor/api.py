@@ -881,6 +881,12 @@ async def webhook_delivery_stats(webhook_id: UUID):
     return {"webhook_id": str(webhook_id), **stats}
 
 
+@app.get("/webhooks/stats", dependencies=[Depends(require_api_key)])
+async def global_webhook_stats():
+    """Return aggregate delivery statistics across all webhooks, with per-event breakdown."""
+    return await storage.get_global_webhook_stats()
+
+
 @app.post("/webhooks/{webhook_id}/deliveries/{delivery_id}/replay",
           dependencies=[Depends(require_api_key)])
 async def replay_webhook_delivery(webhook_id: UUID, delivery_id: int):

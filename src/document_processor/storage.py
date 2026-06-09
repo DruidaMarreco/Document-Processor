@@ -1999,6 +1999,71 @@ async def get_webhook_delivery_stats(webhook_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Global webhook stats
+# ---------------------------------------------------------------------------
+
+async def get_global_webhook_stats() -> dict:
+    """Return aggregate delivery stats across all webhooks."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOK_DELIVERIES)
+        await db.commit()
+        async with db.execute(
+            """SELECT
+                COUNT(*) AS total,
+                SUM(success) AS successes,
+                COUNT(*) - SUM(success) AS failures,
+                AVG(attempt) AS avg_attempts
+               FROM webhook_deliveries"""
+        ) as cur:
+            row = await cur.fetchone()
+        async with db.execute(
+            """SELECT event, COUNT(*) AS cnt, SUM(success) AS ok
+               FROM webhook_deliveries GROUP BY event ORDER BY cnt DESC"""
+        ) as cur:
+            event_rows = await cur.fetchall()
+        async with db.execute(
+            """SELECT webhook_id, COUNT(*) AS total, SUM(success) AS ok
+               FROM webhook_deliveries GROUP BY webhook_id
+               ORDER BY (COUNT(*) - SUM(success)) DESC, total DESC LIMIT 5"""
+        ) as cur:
+            failing_rows = await cur.fetchall()
+
+    total = row[0] or 0
+    successes = int(row[1] or 0)
+    failures = int(row[2] or 0)
+    avg_attempts = round(float(row[3] or 0), 2)
+    success_rate = round(successes / total, 4) if total else 0.0
+    by_event = [
+        {
+            "event": r[0],
+            "total": r[1],
+            "successes": int(r[2] or 0),
+            "failures": r[1] - int(r[2] or 0),
+        }
+        for r in event_rows
+    ]
+    top_failing = [
+        {
+            "webhook_id": r[0],
+            "total": r[1],
+            "successes": int(r[2] or 0),
+            "failures": r[1] - int(r[2] or 0),
+        }
+        for r in failing_rows
+    ]
+    return {
+        "total": total,
+        "successes": successes,
+        "failures": failures,
+        "success_rate": success_rate,
+        "avg_attempts": avg_attempts,
+        "by_event": by_event,
+        "top_failing_webhooks": top_failing,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Result comments
 # ---------------------------------------------------------------------------
 
