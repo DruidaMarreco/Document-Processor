@@ -5,6 +5,7 @@ import csv
 import hashlib
 import io
 import json
+import zipfile
 from pathlib import Path
 from uuid import UUID
 
@@ -1603,3 +1604,31 @@ async def delete_comment(result_id: UUID, comment_id: int) -> bool:
         )
         await db.commit()
     return (cursor.rowcount or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Batch export
+# ---------------------------------------------------------------------------
+
+_EXPORT_EXTENSIONS = {"json": "json", "csv": "csv", "markdown": "md", "xml": "xml"}
+
+
+async def batch_export_zip(ids: list[UUID], format: str = "json") -> bytes:
+    """Export multiple results as a ZIP archive. Missing IDs are silently skipped."""
+    ext = _EXPORT_EXTENSIONS.get(format, "json")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for result_id in ids:
+            result = await get_result(result_id)
+            if result is None:
+                continue
+            if format == "csv":
+                content = result_to_csv(result).encode()
+            elif format == "markdown":
+                content = result_to_markdown(result).encode()
+            elif format == "xml":
+                content = result_to_xml(result).encode()
+            else:
+                content = result.model_dump_json(indent=2).encode()
+            zf.writestr(f"{result_id}.{ext}", content)
+    return buf.getvalue()
