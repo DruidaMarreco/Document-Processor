@@ -23,7 +23,8 @@ _DDL_RESULTS = """
         filename        TEXT,
         data            TEXT NOT NULL,
         created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-        pinned          INTEGER NOT NULL DEFAULT 0
+        pinned          INTEGER NOT NULL DEFAULT 0,
+        workflow_status TEXT
     )
 """
 _DDL_DOCUMENTS = """
@@ -154,11 +155,14 @@ _DDL_JOBS = """
 """
 # Columns added after initial schema — migrated at startup
 _MIGRATION_COLUMNS = [
-    ("doc_type",        "TEXT"),
-    ("pipeline_status", "TEXT"),
-    ("filename",        "TEXT"),
-    ("pinned",          "INTEGER NOT NULL DEFAULT 0"),
+    ("doc_type",         "TEXT"),
+    ("pipeline_status",  "TEXT"),
+    ("filename",         "TEXT"),
+    ("pinned",           "INTEGER NOT NULL DEFAULT 0"),
+    ("workflow_status",  "TEXT"),
 ]
+
+WORKFLOW_STATUSES = {"pending_review", "approved", "rejected", "archived"}
 _MIGRATION_DOCUMENTS_COLUMNS = [
     ("content_hash", "TEXT"),
 ]
@@ -312,6 +316,7 @@ async def search_results(
     date_from: str | None = None,
     date_to: str | None = None,
     pinned: bool | None = None,
+    workflow_status: str | None = None,
     sort_by: str = "created_at",
     sort_order: str = "desc",
     limit: int = 50,
@@ -341,6 +346,9 @@ async def search_results(
     if pinned is not None:
         conditions.append("pinned = ?")
         params.append(1 if pinned else 0)
+    if workflow_status is not None:
+        conditions.append("workflow_status = ?")
+        params.append(workflow_status)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     col = sort_by if sort_by in _SORT_COLUMNS else "created_at"
@@ -1632,3 +1640,36 @@ async def batch_export_zip(ids: list[UUID], format: str = "json") -> bytes:
                 content = result.model_dump_json(indent=2).encode()
             zf.writestr(f"{result_id}.{ext}", content)
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Workflow status
+# ---------------------------------------------------------------------------
+
+async def set_workflow_status(result_id: UUID, status: str) -> bool:
+    """Set the workflow_status on a result. Returns False if result not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        cursor = await db.execute(
+            "UPDATE results SET workflow_status = ? WHERE id = ?",
+            (status, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def get_workflow_status(result_id: UUID) -> str | None:
+    """Return the workflow_status for a result, or None if not set / not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            "SELECT workflow_status FROM results WHERE id = ?", (str(result_id),)
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return row[0]  # may be None if column is NULL
