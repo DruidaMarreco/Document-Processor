@@ -1436,6 +1436,63 @@ async def get_audit_log(
 
 
 # ---------------------------------------------------------------------------
+# Bookmark endpoints
+# ---------------------------------------------------------------------------
+
+class BookmarkBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    reference: str = Field(..., min_length=1, max_length=500, description="Opaque reference string (page, line, section, URL fragment…)")
+    note: str | None = Field(None, max_length=500)
+
+
+@app.put("/results/{document_id}/bookmarks/{name}", status_code=200,
+         dependencies=[Depends(require_api_key)])
+async def upsert_bookmark(document_id: UUID, name: str, body: BookmarkBody):
+    """Create or update a named bookmark on a result (name in path overrides body.name)."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    bm = await storage.upsert_bookmark(document_id, name, body.reference, body.note)
+    await storage.append_audit(document_id, "bookmark_set", f"name={name}")
+    return bm
+
+
+@app.get("/results/{document_id}/bookmarks", dependencies=[Depends(require_api_key)])
+async def list_bookmarks(document_id: UUID):
+    """List all named bookmarks for a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    bookmarks = await storage.get_bookmarks(document_id)
+    return {"document_id": str(document_id), "bookmarks": bookmarks}
+
+
+@app.get("/results/{document_id}/bookmarks/{name}", dependencies=[Depends(require_api_key)])
+async def get_bookmark(document_id: UUID, name: str):
+    """Get a specific named bookmark."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    bm = await storage.get_bookmark(document_id, name)
+    if not bm:
+        raise HTTPException(status_code=404, detail="Bookmark not found")
+    return bm
+
+
+@app.delete("/results/{document_id}/bookmarks/{name}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def delete_bookmark(document_id: UUID, name: str):
+    """Delete a named bookmark."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    deleted = await storage.delete_bookmark(document_id, name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Bookmark not found")
+    await storage.append_audit(document_id, "bookmark_deleted", f"name={name}")
+
+
+# ---------------------------------------------------------------------------
 # Checklist endpoints
 # ---------------------------------------------------------------------------
 
