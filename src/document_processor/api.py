@@ -898,6 +898,42 @@ async def list_webhooks():
     return await storage.list_webhooks()
 
 
+@app.get("/webhooks/events", dependencies=[Depends(require_api_key)])
+async def list_webhook_event_types():
+    """Return the known webhook event names that can be used in the events filter."""
+    return {
+        "events": [
+            "document.processed",
+            "document.failed",
+            "document.reprocessed",
+            "ping",
+        ]
+    }
+
+
+class WebhookPatch(BaseModel):
+    url: str | None = None
+    events: list[str] | None = None
+    doc_types: list[str] | None = Field(None, description="If non-empty, only fire for these doc_types")
+    secret: str | None = None
+
+
+@app.patch("/webhooks/{webhook_id}", response_model=WebhookConfig,
+           dependencies=[Depends(require_api_key)])
+async def patch_webhook(webhook_id: UUID, body: WebhookPatch):
+    """Update one or more webhook fields (url, events, doc_types, secret) without recreation."""
+    updated = await storage.patch_webhook(
+        webhook_id,
+        url=body.url,
+        events=body.events,
+        doc_types=body.doc_types,
+        secret=body.secret,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return updated
+
+
 @app.delete("/webhooks/{webhook_id}", status_code=204,
             dependencies=[Depends(require_api_key)])
 async def delete_webhook(webhook_id: UUID):

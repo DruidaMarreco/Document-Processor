@@ -620,6 +620,29 @@ async def get_webhook(webhook_id: UUID) -> WebhookConfig | None:
     )
 
 
+async def patch_webhook(
+    webhook_id: UUID,
+    url: str | None = None,
+    events: list[str] | None = None,
+    doc_types: list[str] | None = None,
+    secret: str | None = None,
+) -> WebhookConfig | None:
+    """Selectively update webhook fields. Returns updated config, or None if not found."""
+    wh = await get_webhook(webhook_id)
+    if wh is None:
+        return None
+    if url is not None:
+        wh.url = url
+    if events is not None:
+        wh.events = events
+    if doc_types is not None:
+        wh.doc_types = doc_types
+    if secret is not None:
+        wh.secret = secret
+    await save_webhook(wh)
+    return wh
+
+
 async def delete_webhook(webhook_id: UUID) -> bool:
     _ensure_dir()
     async with aiosqlite.connect(_db_path()) as db:
