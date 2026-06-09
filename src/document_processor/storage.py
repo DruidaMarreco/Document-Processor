@@ -48,6 +48,15 @@ _DDL_NOTES = """
         updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_AUDIT = """
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_id  TEXT NOT NULL,
+        action     TEXT NOT NULL,
+        detail     TEXT,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_WEBHOOKS = """
     CREATE TABLE IF NOT EXISTS webhooks (
         id         TEXT PRIMARY KEY,
@@ -114,6 +123,7 @@ async def init_db() -> None:
         await db.execute(_DDL_JOBS)
         await db.execute(_DDL_TAGS)
         await db.execute(_DDL_NOTES)
+        await db.execute(_DDL_AUDIT)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -783,3 +793,35 @@ async def delete_note(result_id: UUID) -> bool:
         )
         await db.commit()
     return (cursor.rowcount or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+
+async def append_audit(result_id: UUID | str, action: str, detail: str | None = None) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_AUDIT)
+        await db.execute(
+            "INSERT INTO audit_log (result_id, action, detail) VALUES (?, ?, ?)",
+            (str(result_id), action, detail),
+        )
+        await db.commit()
+
+
+async def get_audit_log(result_id: UUID, limit: int = 100) -> list[dict]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_AUDIT)
+        await db.commit()
+        async with db.execute(
+            "SELECT id, action, detail, created_at FROM audit_log "
+            "WHERE result_id = ? ORDER BY id ASC LIMIT ?",
+            (str(result_id), limit),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {"id": r[0], "action": r[1], "detail": r[2], "created_at": r[3]}
+        for r in rows
+    ]
