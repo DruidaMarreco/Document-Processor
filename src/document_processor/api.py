@@ -98,6 +98,18 @@ def _parse_config(raw: str | None) -> dict:
         return {}
 
 
+async def _resolve_config(config_str: str | None, template: str | None) -> dict:
+    """Merge template config (lower priority) with inline config (higher priority)."""
+    base: dict = {}
+    if template:
+        tmpl = await storage.get_template(template)
+        if tmpl:
+            base = dict(tmpl["config"])
+    inline = _parse_config(config_str)
+    base.update(inline)
+    return base
+
+
 @app.post("/process", response_model=PipelineResult, dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
 async def process_document(
@@ -106,6 +118,7 @@ async def process_document(
     background_tasks: BackgroundTasks = BackgroundTasks(),
     dedup: bool = Query(False, description="Return cached result for identical content"),
     config: str | None = Form(None, description="Optional JSON pipeline config overrides"),
+    template: str | None = Query(None, description="Named processing template to use as base config"),
 ):
     content = await file.read()
     if dedup:
@@ -122,7 +135,7 @@ async def process_document(
         content=content,
     )
     pipeline = registry.build_pipeline()
-    seed_ctx = {"_config": _parse_config(config)}
+    seed_ctx = {"_config": await _resolve_config(config, template)}
     result = await pipeline.run(document, context=seed_ctx)
     await storage.save_result(result, document=document)
     await storage.append_audit(result.document_id, "processed",
@@ -568,6 +581,42 @@ async def get_audit_log(
         raise HTTPException(status_code=404, detail="Result not found")
     entries = await storage.get_audit_log(document_id, limit=limit)
     return {"document_id": str(document_id), "entries": entries}
+
+
+# ---------------------------------------------------------------------------
+# Processing templates
+# ---------------------------------------------------------------------------
+
+class TemplateCreate(BaseModel):
+    name: str
+    config: dict
+    description: str | None = None
+
+
+@app.post("/templates", status_code=201, dependencies=[Depends(require_api_key)])
+async def create_or_update_template(body: TemplateCreate):
+    """Create or update a named processing template (upsert by name)."""
+    return await storage.save_template(body.name, body.config, body.description)
+
+
+@app.get("/templates", dependencies=[Depends(require_api_key)])
+async def list_templates():
+    return await storage.list_templates()
+
+
+@app.get("/templates/{name}", dependencies=[Depends(require_api_key)])
+async def get_template(name: str):
+    tmpl = await storage.get_template(name)
+    if not tmpl:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return tmpl
+
+
+@app.delete("/templates/{name}", status_code=204, dependencies=[Depends(require_api_key)])
+async def delete_template(name: str):
+    deleted = await storage.delete_template(name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Template not found")
 
 
 # ---------------------------------------------------------------------------

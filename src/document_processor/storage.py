@@ -58,6 +58,15 @@ _DDL_AUDIT = """
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_TEMPLATES = """
+    CREATE TABLE IF NOT EXISTS processing_templates (
+        name        TEXT PRIMARY KEY,
+        config      TEXT NOT NULL,
+        description TEXT,
+        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_COLLECTIONS = """
     CREATE TABLE IF NOT EXISTS collections (
         id          TEXT PRIMARY KEY,
@@ -142,6 +151,7 @@ async def init_db() -> None:
         await db.execute(_DDL_TAGS)
         await db.execute(_DDL_NOTES)
         await db.execute(_DDL_AUDIT)
+        await db.execute(_DDL_TEMPLATES)
         await db.execute(_DDL_COLLECTIONS)
         await db.execute(_DDL_COLLECTION_MEMBERS)
         # Add columns that may not exist in older databases
@@ -853,6 +863,72 @@ async def is_pinned(result_id: UUID) -> bool | None:
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Processing templates
+# ---------------------------------------------------------------------------
+
+async def save_template(name: str, config: dict, description: str | None = None) -> dict:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_TEMPLATES)
+        await db.execute(
+            """INSERT INTO processing_templates (name, config, description, updated_at)
+               VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(name) DO UPDATE SET
+                   config = excluded.config,
+                   description = COALESCE(excluded.description, description),
+                   updated_at = excluded.updated_at""",
+            (name, json.dumps(config), description),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT name, config, description, created_at, updated_at "
+            "FROM processing_templates WHERE name = ?", (name,)
+        ) as cur:
+            row = await cur.fetchone()
+    return {"name": row[0], "config": json.loads(row[1]), "description": row[2],
+            "created_at": row[3], "updated_at": row[4]}
+
+
+async def get_template(name: str) -> dict | None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_TEMPLATES)
+        await db.commit()
+        async with db.execute(
+            "SELECT name, config, description, created_at, updated_at "
+            "FROM processing_templates WHERE name = ?", (name,)
+        ) as cur:
+            row = await cur.fetchone()
+    return {"name": row[0], "config": json.loads(row[1]), "description": row[2],
+            "created_at": row[3], "updated_at": row[4]} if row else None
+
+
+async def list_templates() -> list[dict]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_TEMPLATES)
+        await db.commit()
+        async with db.execute(
+            "SELECT name, config, description, created_at, updated_at "
+            "FROM processing_templates ORDER BY name"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"name": r[0], "config": json.loads(r[1]), "description": r[2],
+             "created_at": r[3], "updated_at": r[4]} for r in rows]
+
+
+async def delete_template(name: str) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_TEMPLATES)
+        cursor = await db.execute(
+            "DELETE FROM processing_templates WHERE name = ?", (name,)
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
 
 # ---------------------------------------------------------------------------
 # Collections
