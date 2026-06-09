@@ -3,9 +3,23 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from contextvars import ContextVar
 from typing import Any
 
 _log = logging.getLogger(__name__)
+
+# Per-async-task LLM usage accumulator — safe under concurrent requests.
+_usage_accumulator: ContextVar[list[dict] | None] = ContextVar("_llm_usage", default=None)
+
+
+def start_usage_tracking() -> None:
+    """Reset the usage accumulator for the current async task (call before each pipeline run)."""
+    _usage_accumulator.set([])
+
+
+def get_llm_usage() -> list[dict]:
+    """Return accumulated LLM usage entries for the current async task."""
+    return _usage_accumulator.get(None) or []
 
 try:
     import anthropic as _anthropic
@@ -95,6 +109,14 @@ class LLMClient:
                 tool_choice={"type": "tool", "name": "set_document_type"},
                 messages=[{"role": "user", "content": content}],
             )
+            acc = _usage_accumulator.get(None)
+            if acc is not None and hasattr(response, "usage") and response.usage:
+                acc.append({
+                    "stage": "classifier",
+                    "model": self.model,
+                    "input_tokens": getattr(response.usage, "input_tokens", 0),
+                    "output_tokens": getattr(response.usage, "output_tokens", 0),
+                })
             for block in response.content:
                 if block.type == "tool_use" and block.name == "set_document_type":
                     inp = block.input
@@ -191,6 +213,14 @@ class LLMClient:
                 tool_choice={"type": "tool", "name": "set_extracted_fields"},
                 messages=[{"role": "user", "content": content}],
             )
+            acc = _usage_accumulator.get(None)
+            if acc is not None and hasattr(response, "usage") and response.usage:
+                acc.append({
+                    "stage": "extractor",
+                    "model": self.model,
+                    "input_tokens": getattr(response.usage, "input_tokens", 0),
+                    "output_tokens": getattr(response.usage, "output_tokens", 0),
+                })
             for block in response.content:
                 if block.type == "tool_use" and block.name == "set_extracted_fields":
                     return {k: v for k, v in block.input.items() if v}
