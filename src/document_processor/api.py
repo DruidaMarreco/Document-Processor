@@ -299,6 +299,43 @@ async def delete_result(document_id: UUID):
 
 
 # ---------------------------------------------------------------------------
+# Bulk operations
+# ---------------------------------------------------------------------------
+
+class BulkDeleteBody(BaseModel):
+    ids: list[UUID]
+
+
+class BulkTagBody(BaseModel):
+    ids: list[UUID]
+    tags: list[str]
+
+
+@app.post("/results/bulk-delete", dependencies=[Depends(require_api_key)])
+async def bulk_delete_results(body: BulkDeleteBody):
+    """Delete up to 100 results in one request. Returns count of results actually deleted."""
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="ids must not be empty")
+    if len(body.ids) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 ids per request")
+    deleted = await storage.bulk_delete_results(body.ids)
+    return {"deleted": deleted, "requested": len(body.ids)}
+
+
+@app.post("/results/bulk-tag", dependencies=[Depends(require_api_key)])
+async def bulk_tag_results(body: BulkTagBody):
+    """Add tags to up to 100 results in one request. Non-existent IDs are silently skipped."""
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="ids must not be empty")
+    if len(body.ids) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 ids per request")
+    if not body.tags:
+        raise HTTPException(status_code=400, detail="tags must not be empty")
+    updated = await storage.bulk_add_tags(body.ids, body.tags)
+    return {"updated": updated, "requested": len(body.ids)}
+
+
+# ---------------------------------------------------------------------------
 # Tagging endpoints
 # ---------------------------------------------------------------------------
 
