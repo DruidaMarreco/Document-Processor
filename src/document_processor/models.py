@@ -42,6 +42,7 @@ class WebhookConfig(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     url: str
     events: list[str] = Field(default_factory=lambda: ["document.processed", "document.failed"])
+    doc_types: list[str] = Field(default_factory=list, description="If non-empty, only fire for these doc_types")
     secret: str | None = None
     active: bool = True
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

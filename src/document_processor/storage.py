@@ -100,11 +100,15 @@ _DDL_WEBHOOKS = """
         id         TEXT PRIMARY KEY,
         url        TEXT NOT NULL,
         events     TEXT NOT NULL,
+        doc_types  TEXT NOT NULL DEFAULT '[]',
         secret     TEXT,
         active     INTEGER NOT NULL DEFAULT 1,
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_MIGRATION_WEBHOOKS_COLUMNS = [
+    ("doc_types", "TEXT NOT NULL DEFAULT '[]'"),
+]
 _DDL_API_KEYS = """
     CREATE TABLE IF NOT EXISTS api_keys (
         key_hash   TEXT PRIMARY KEY,
@@ -176,6 +180,11 @@ async def init_db() -> None:
         for col, col_type in _MIGRATION_DOCUMENTS_COLUMNS:
             try:
                 await db.execute(f"ALTER TABLE documents ADD COLUMN {col} {col_type}")
+            except Exception:
+                pass
+        for col, col_type in _MIGRATION_WEBHOOKS_COLUMNS:
+            try:
+                await db.execute(f"ALTER TABLE webhooks ADD COLUMN {col} {col_type}")
             except Exception:
                 pass
         await db.commit()
@@ -412,9 +421,10 @@ async def save_webhook(wh: WebhookConfig) -> None:
     async with aiosqlite.connect(_db_path()) as db:
         await db.execute(_DDL_WEBHOOKS)
         await db.execute(
-            """INSERT OR REPLACE INTO webhooks (id, url, events, secret, active)
-               VALUES (?, ?, ?, ?, ?)""",
-            (str(wh.id), wh.url, json.dumps(wh.events), wh.secret, int(wh.active)),
+            """INSERT OR REPLACE INTO webhooks (id, url, events, doc_types, secret, active)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (str(wh.id), wh.url, json.dumps(wh.events), json.dumps(wh.doc_types),
+             wh.secret, int(wh.active)),
         )
         await db.commit()
 
@@ -426,13 +436,14 @@ async def list_webhooks(active_only: bool = False) -> list[WebhookConfig]:
         await db.commit()
         where = "WHERE active = 1" if active_only else ""
         async with db.execute(
-            f"SELECT id, url, events, secret, active, created_at FROM webhooks {where}"
+            f"SELECT id, url, events, doc_types, secret, active FROM webhooks {where}"
         ) as cursor:
             rows = await cursor.fetchall()
     return [
         WebhookConfig(
             id=row[0], url=row[1], events=json.loads(row[2]),
-            secret=row[3], active=bool(row[4]),
+            doc_types=json.loads(row[3] or "[]"),
+            secret=row[4], active=bool(row[5]),
         )
         for row in rows
     ]
@@ -444,7 +455,7 @@ async def get_webhook(webhook_id: UUID) -> WebhookConfig | None:
         await db.execute(_DDL_WEBHOOKS)
         await db.commit()
         async with db.execute(
-            "SELECT id, url, events, secret, active FROM webhooks WHERE id = ?",
+            "SELECT id, url, events, doc_types, secret, active FROM webhooks WHERE id = ?",
             (str(webhook_id),),
         ) as cursor:
             row = await cursor.fetchone()
@@ -452,7 +463,8 @@ async def get_webhook(webhook_id: UUID) -> WebhookConfig | None:
         return None
     return WebhookConfig(
         id=row[0], url=row[1], events=json.loads(row[2]),
-        secret=row[3], active=bool(row[4]),
+        doc_types=json.loads(row[3] or "[]"),
+        secret=row[4], active=bool(row[5]),
     )
 
 

@@ -45,13 +45,29 @@ async def _deliver_one(wh: WebhookConfig, event: str, payload: bytes) -> bool:
     return False
 
 
+def _result_doc_type(result: PipelineResult) -> str | None:
+    for stage in result.stages:
+        if stage.module == "classifier":
+            return stage.data.get("type")
+    return None
+
+
 async def fire_webhooks(
     webhooks: list[WebhookConfig],
     event: str,
     result: PipelineResult,
 ) -> None:
     """Deliver event to all matching active webhooks concurrently."""
-    matching = [wh for wh in webhooks if wh.active and event in wh.events]
+    doc_type = _result_doc_type(result)
+
+    def _matches(wh: WebhookConfig) -> bool:
+        if not wh.active or event not in wh.events:
+            return False
+        if wh.doc_types and doc_type not in wh.doc_types:
+            return False
+        return True
+
+    matching = [wh for wh in webhooks if _matches(wh)]
     if not matching:
         return
 

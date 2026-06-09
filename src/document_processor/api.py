@@ -12,7 +12,7 @@ import json as _json
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -561,13 +561,15 @@ async def get_job(job_id: UUID):
 class WebhookCreate(BaseModel):
     url: str
     events: list[str] = ["document.processed", "document.failed", "document.reprocessed"]
+    doc_types: list[str] = Field(default_factory=list,
+                                  description="If non-empty, only fire for these doc_types")
     secret: str | None = None
 
 
 @app.post("/webhooks", response_model=WebhookConfig, status_code=201,
           dependencies=[Depends(require_api_key)])
 async def create_webhook(body: WebhookCreate):
-    wh = WebhookConfig(url=body.url, events=body.events, secret=body.secret)
+    wh = WebhookConfig(url=body.url, events=body.events, doc_types=body.doc_types, secret=body.secret)
     await storage.save_webhook(wh)
     return wh
 
