@@ -280,6 +280,57 @@ async def delete_result(document_id: UUID) -> None:
         await db.commit()
 
 
+async def bulk_delete_results(document_ids: list[UUID]) -> int:
+    """Delete multiple results (+ documents, tags, notes). Returns count actually deleted."""
+    if not document_ids:
+        return 0
+    ids = [str(d) for d in document_ids]
+    placeholders = ",".join("?" * len(ids))
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.execute(_DDL_DOCUMENTS)
+        await db.execute(_DDL_TAGS)
+        await db.execute(_DDL_NOTES)
+        await db.commit()
+        async with db.execute(
+            f"SELECT COUNT(*) FROM results WHERE id IN ({placeholders})", ids
+        ) as cur:
+            found: int = (await cur.fetchone())[0]  # type: ignore[index]
+        for table in ("tags", "notes"):
+            await db.execute(f"DELETE FROM {table} WHERE result_id IN ({placeholders})", ids)
+        for table in ("documents", "results"):
+            await db.execute(f"DELETE FROM {table} WHERE id IN ({placeholders})", ids)
+        await db.commit()
+    return found
+
+
+async def bulk_add_tags(document_ids: list[UUID], tags: list[str]) -> int:
+    """Add tags to multiple results. Skips IDs that don't exist. Returns count of results updated."""
+    if not document_ids or not tags:
+        return 0
+    ids = [str(d) for d in document_ids]
+    placeholders = ",".join("?" * len(ids))
+    normalised = [t.strip().lower() for t in tags if t.strip()]
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.execute(_DDL_TAGS)
+        await db.commit()
+        async with db.execute(
+            f"SELECT id FROM results WHERE id IN ({placeholders})", ids
+        ) as cur:
+            existing_ids = [r[0] for r in await cur.fetchall()]
+        for result_id in existing_ids:
+            for tag in normalised:
+                await db.execute(
+                    "INSERT OR IGNORE INTO tags (result_id, tag) VALUES (?, ?)",
+                    (result_id, tag),
+                )
+        await db.commit()
+    return len(existing_ids)
+
+
 async def list_results(limit: int = 100) -> list[PipelineResult]:
     results, _ = await search_results(limit=limit)
     return results
