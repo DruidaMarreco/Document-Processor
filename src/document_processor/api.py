@@ -356,6 +356,27 @@ def _diff_dicts(left: dict, right: dict) -> dict:
     }
 
 
+@app.get("/results/{document_id}/confidence", dependencies=[Depends(require_api_key)])
+async def get_field_confidence(document_id: UUID):
+    """Return per-field confidence scores for a result's extracted fields."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    field_confidence: dict = {}
+    overall_confidence: float | None = None
+    for stage in result.stages:
+        if stage.module == "classifier":
+            overall_confidence = stage.data.get("confidence")
+        if stage.module == "generator":
+            field_confidence = (stage.data.get("output") or {}).get("field_confidence", {})
+    return {
+        "document_id": str(document_id),
+        "overall_confidence": overall_confidence,
+        "field_confidence": field_confidence,
+        "field_count": len(field_confidence),
+    }
+
+
 @app.get("/results/{document_id}/diff/{other_id}", dependencies=[Depends(require_api_key)])
 async def diff_results(document_id: UUID, other_id: UUID):
     """Compare two pipeline results. Returns per-field diff (changed, left, right)."""
