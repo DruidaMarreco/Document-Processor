@@ -100,6 +100,13 @@ _DDL_AUDIT = """
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_ACCESS_LOG = """
+    CREATE TABLE IF NOT EXISTS result_access_log (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_id  TEXT NOT NULL,
+        accessed_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_SCHEDULED = """
     CREATE TABLE IF NOT EXISTS scheduled_jobs (
         id           TEXT PRIMARY KEY,
@@ -237,6 +244,7 @@ async def init_db() -> None:
         await db.execute(_DDL_TAGS)
         await db.execute(_DDL_NOTES)
         await db.execute(_DDL_AUDIT)
+        await db.execute(_DDL_ACCESS_LOG)
         await db.execute(_DDL_SCHEDULED)
         await db.execute(_DDL_TEMPLATES)
         await db.execute(_DDL_COLLECTIONS)
@@ -1829,6 +1837,50 @@ async def get_audit_log(result_id: UUID, limit: int = 100) -> list[dict]:
         {"id": r[0], "action": r[1], "detail": r[2], "created_at": r[3]}
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Result access log
+# ---------------------------------------------------------------------------
+
+async def record_result_access(result_id: UUID) -> None:
+    """Record that a result was accessed (fetched via GET)."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_ACCESS_LOG)
+        await db.execute(
+            "INSERT INTO result_access_log (result_id) VALUES (?)",
+            (str(result_id),),
+        )
+        await db.commit()
+
+
+async def get_result_access_log(
+    result_id: UUID, limit: int = 100, offset: int = 0
+) -> tuple[list[dict], int]:
+    """Return paginated access log entries for a result."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_ACCESS_LOG)
+        await db.commit()
+        async with db.execute(
+            "SELECT COUNT(*) FROM result_access_log WHERE result_id = ?",
+            (str(result_id),),
+        ) as cur:
+            total: int = (await cur.fetchone())[0]  # type: ignore[index]
+        async with db.execute(
+            "SELECT id, accessed_at FROM result_access_log "
+            "WHERE result_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+            (str(result_id), limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"id": r[0], "accessed_at": r[1]} for r in rows], total
+
+
+async def get_result_access_count(result_id: UUID) -> int:
+    """Return total number of times a result has been accessed."""
+    _, total = await get_result_access_log(result_id, limit=0)
+    return total
 
 
 # ---------------------------------------------------------------------------
