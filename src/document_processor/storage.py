@@ -83,6 +83,17 @@ _DDL_METADATA = """
         PRIMARY KEY (result_id, key)
     )
 """
+_DDL_ATTACHMENTS = """
+    CREATE TABLE IF NOT EXISTS result_attachments (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_id   TEXT NOT NULL,
+        filename    TEXT NOT NULL,
+        mimetype    TEXT NOT NULL DEFAULT 'application/octet-stream',
+        size        INTEGER NOT NULL DEFAULT 0,
+        content     BLOB NOT NULL,
+        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_BOOKMARKS = """
     CREATE TABLE IF NOT EXISTS result_bookmarks (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -306,6 +317,7 @@ async def init_db() -> None:
         await db.execute(_DDL_REACTIONS)
         await db.execute(_DDL_CHECKLIST)
         await db.execute(_DDL_BOOKMARKS)
+        await db.execute(_DDL_ATTACHMENTS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -2601,6 +2613,76 @@ async def delete_bookmark(result_id: UUID, name: str) -> bool:
         cursor = await db.execute(
             "DELETE FROM result_bookmarks WHERE result_id = ? AND name = ?",
             (str(result_id), name),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Result attachments
+# ---------------------------------------------------------------------------
+
+async def save_attachment(
+    result_id: UUID,
+    filename: str,
+    mimetype: str,
+    content: bytes,
+) -> dict:
+    _ensure_dir()
+    size = len(content)
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_ATTACHMENTS)
+        cursor = await db.execute(
+            """INSERT INTO result_attachments (result_id, filename, mimetype, size, content)
+               VALUES (?, ?, ?, ?, ?)""",
+            (str(result_id), filename, mimetype, size, content),
+        )
+        row_id = cursor.lastrowid
+        await db.commit()
+        row = await (
+            await db.execute(
+                "SELECT id, filename, mimetype, size, created_at FROM result_attachments WHERE id = ?",
+                (row_id,),
+            )
+        ).fetchone()
+    return {"id": row[0], "filename": row[1], "mimetype": row[2], "size": row[3], "created_at": row[4]}
+
+
+async def list_attachments(result_id: UUID) -> list[dict]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_ATTACHMENTS)
+        rows = await (
+            await db.execute(
+                "SELECT id, filename, mimetype, size, created_at FROM result_attachments WHERE result_id = ? ORDER BY created_at",
+                (str(result_id),),
+            )
+        ).fetchall()
+    return [{"id": r[0], "filename": r[1], "mimetype": r[2], "size": r[3], "created_at": r[4]} for r in rows]
+
+
+async def get_attachment(result_id: UUID, attachment_id: int) -> dict | None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_ATTACHMENTS)
+        row = await (
+            await db.execute(
+                "SELECT id, filename, mimetype, size, content, created_at FROM result_attachments WHERE id = ? AND result_id = ?",
+                (attachment_id, str(result_id)),
+            )
+        ).fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "filename": row[1], "mimetype": row[2], "size": row[3], "content": row[4], "created_at": row[5]}
+
+
+async def delete_attachment(result_id: UUID, attachment_id: int) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_ATTACHMENTS)
+        cursor = await db.execute(
+            "DELETE FROM result_attachments WHERE id = ? AND result_id = ?",
+            (attachment_id, str(result_id)),
         )
         await db.commit()
     return (cursor.rowcount or 0) > 0

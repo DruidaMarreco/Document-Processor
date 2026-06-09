@@ -1529,6 +1529,68 @@ async def delete_bookmark(document_id: UUID, name: str):
 
 
 # ---------------------------------------------------------------------------
+# Attachment endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/results/{document_id}/attachments", status_code=201,
+          dependencies=[Depends(require_api_key)])
+async def upload_attachment(document_id: UUID, file: UploadFile = File(...)):
+    """Upload a file attachment to a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    content = await file.read()
+    attachment = await storage.save_attachment(
+        document_id,
+        file.filename or "unnamed",
+        file.content_type or "application/octet-stream",
+        content,
+    )
+    await storage.append_audit(document_id, "attachment_added", f"filename={attachment['filename']}")
+    return attachment
+
+
+@app.get("/results/{document_id}/attachments", dependencies=[Depends(require_api_key)])
+async def list_attachments(document_id: UUID):
+    """List all attachments for a result (without content)."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    attachments = await storage.list_attachments(document_id)
+    return {"document_id": str(document_id), "attachments": attachments}
+
+
+@app.get("/results/{document_id}/attachments/{attachment_id}",
+         dependencies=[Depends(require_api_key)])
+async def download_attachment(document_id: UUID, attachment_id: int):
+    """Download a single attachment by ID."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    attachment = await storage.get_attachment(document_id, attachment_id)
+    if not attachment:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    return Response(
+        content=attachment["content"],
+        media_type=attachment["mimetype"],
+        headers={"Content-Disposition": f'attachment; filename="{attachment["filename"]}"'},
+    )
+
+
+@app.delete("/results/{document_id}/attachments/{attachment_id}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def delete_attachment(document_id: UUID, attachment_id: int):
+    """Delete an attachment."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    deleted = await storage.delete_attachment(document_id, attachment_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    await storage.append_audit(document_id, "attachment_deleted", f"id={attachment_id}")
+
+
+# ---------------------------------------------------------------------------
 # Checklist endpoints
 # ---------------------------------------------------------------------------
 
