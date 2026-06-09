@@ -1436,6 +1436,78 @@ async def get_audit_log(
 
 
 # ---------------------------------------------------------------------------
+# Checklist endpoints
+# ---------------------------------------------------------------------------
+
+class ChecklistItemBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=500)
+
+
+@app.post("/results/{document_id}/checklist", status_code=201,
+          dependencies=[Depends(require_api_key)])
+async def add_checklist_item(document_id: UUID, body: ChecklistItemBody):
+    """Add a checklist item to a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    item = await storage.add_checklist_item(document_id, body.text)
+    await storage.append_audit(document_id, "checklist_item_added", f"id={item['id']}")
+    return item
+
+
+@app.get("/results/{document_id}/checklist", dependencies=[Depends(require_api_key)])
+async def get_checklist(document_id: UUID):
+    """List all checklist items for a result (ordered by position)."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    items = await storage.get_checklist(document_id)
+    progress = await storage.get_checklist_progress(document_id)
+    return {"document_id": str(document_id), "items": items, "progress": progress}
+
+
+@app.put("/results/{document_id}/checklist/{item_id}/check", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def check_item(document_id: UUID, item_id: int):
+    """Mark a checklist item as checked."""
+    updated = await storage.set_checklist_item_checked(document_id, item_id, True)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Checklist item not found")
+    await storage.append_audit(document_id, "checklist_item_checked", f"id={item_id}")
+
+
+@app.put("/results/{document_id}/checklist/{item_id}/uncheck", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def uncheck_item(document_id: UUID, item_id: int):
+    """Mark a checklist item as unchecked."""
+    updated = await storage.set_checklist_item_checked(document_id, item_id, False)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Checklist item not found")
+
+
+@app.delete("/results/{document_id}/checklist/{item_id}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def delete_checklist_item(document_id: UUID, item_id: int):
+    """Delete a checklist item."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    deleted = await storage.delete_checklist_item(document_id, item_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Checklist item not found")
+
+
+@app.get("/results/{document_id}/checklist/progress", dependencies=[Depends(require_api_key)])
+async def get_checklist_progress(document_id: UUID):
+    """Return total/checked/unchecked counts for a result's checklist."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    progress = await storage.get_checklist_progress(document_id)
+    return {"document_id": str(document_id), **progress}
+
+
+# ---------------------------------------------------------------------------
 # Reaction endpoints
 # ---------------------------------------------------------------------------
 

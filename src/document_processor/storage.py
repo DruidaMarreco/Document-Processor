@@ -83,6 +83,16 @@ _DDL_METADATA = """
         PRIMARY KEY (result_id, key)
     )
 """
+_DDL_CHECKLIST = """
+    CREATE TABLE IF NOT EXISTS result_checklist (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_id  TEXT NOT NULL,
+        text       TEXT NOT NULL,
+        checked    INTEGER NOT NULL DEFAULT 0,
+        position   INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_REACTIONS = """
     CREATE TABLE IF NOT EXISTS result_reactions (
         result_id  TEXT NOT NULL,
@@ -283,6 +293,7 @@ async def init_db() -> None:
         await db.execute(_DDL_LABELS)
         await db.execute(_DDL_RESULT_LABELS)
         await db.execute(_DDL_REACTIONS)
+        await db.execute(_DDL_CHECKLIST)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -2488,6 +2499,91 @@ async def get_stats_error_rates() -> list[dict]:
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Result checklist
+# ---------------------------------------------------------------------------
+
+async def add_checklist_item(result_id: UUID, text: str) -> dict:
+    """Append a new checklist item. Position = current max + 1."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_CHECKLIST)
+        async with db.execute(
+            "SELECT COALESCE(MAX(position), -1) FROM result_checklist WHERE result_id = ?",
+            (str(result_id),),
+        ) as cur:
+            pos: int = (await cur.fetchone())[0] + 1  # type: ignore[index]
+        cursor = await db.execute(
+            "INSERT INTO result_checklist (result_id, text, position) VALUES (?, ?, ?)",
+            (str(result_id), text, pos),
+        )
+        item_id = cursor.lastrowid
+        await db.commit()
+        async with db.execute(
+            "SELECT id, text, checked, position, created_at FROM result_checklist WHERE id = ?",
+            (item_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return {"id": row[0], "text": row[1], "checked": bool(row[2]), "position": row[3], "created_at": row[4]}
+
+
+async def get_checklist(result_id: UUID) -> list[dict]:
+    """Return all checklist items for a result, ordered by position."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_CHECKLIST)
+        await db.commit()
+        async with db.execute(
+            "SELECT id, text, checked, position, created_at FROM result_checklist "
+            "WHERE result_id = ? ORDER BY position ASC",
+            (str(result_id),),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"id": r[0], "text": r[1], "checked": bool(r[2]), "position": r[3], "created_at": r[4]} for r in rows]
+
+
+async def set_checklist_item_checked(result_id: UUID, item_id: int, checked: bool) -> bool:
+    """Toggle checked state of a checklist item. Returns False if item not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_CHECKLIST)
+        cursor = await db.execute(
+            "UPDATE result_checklist SET checked = ? WHERE id = ? AND result_id = ?",
+            (1 if checked else 0, item_id, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def delete_checklist_item(result_id: UUID, item_id: int) -> bool:
+    """Delete a checklist item. Returns False if not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_CHECKLIST)
+        cursor = await db.execute(
+            "DELETE FROM result_checklist WHERE id = ? AND result_id = ?",
+            (item_id, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def get_checklist_progress(result_id: UUID) -> dict:
+    """Return total/checked/unchecked counts for a result's checklist."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_CHECKLIST)
+        await db.commit()
+        async with db.execute(
+            "SELECT COUNT(*), SUM(checked) FROM result_checklist WHERE result_id = ?",
+            (str(result_id),),
+        ) as cur:
+            row = await cur.fetchone()
+    total = row[0] or 0
+    checked = int(row[1] or 0)
+    return {"total": total, "checked": checked, "unchecked": total - checked}
 
 
 # ---------------------------------------------------------------------------
