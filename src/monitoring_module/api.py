@@ -53,6 +53,12 @@ async def history(n: int = 100) -> list[dict]:
     return [json.loads(e.to_sse().removeprefix("data: ").strip()) for e in store.recent(n)]
 
 
+@app.get("/errors")
+async def recent_errors(n: int = 20) -> list[dict]:
+    import json
+    return [json.loads(e.to_sse().removeprefix("data: ").strip()) for e in store.recent_errors(n)]
+
+
 @app.get("/metrics", response_class=Response)
 async def prometheus_metrics() -> Response:
     s = store.stats
@@ -98,6 +104,49 @@ async def prometheus_metrics() -> Response:
     ]
     for doc_type, count in s.get("by_doc_type", {}).items():
         lines.append(f'doc_processor_doc_type_total{{doc_type="{doc_type}"}} {count}')
+
+    # Latency percentiles
+    lp = s.get("latency_percentiles", {})
+    lines += [
+        "# HELP doc_processor_duration_p50_ms P50 stage duration across all modules",
+        "# TYPE doc_processor_duration_p50_ms gauge",
+        f"doc_processor_duration_p50_ms {lp.get('p50', 0)}",
+        "# HELP doc_processor_duration_p95_ms P95 stage duration across all modules",
+        "# TYPE doc_processor_duration_p95_ms gauge",
+        f"doc_processor_duration_p95_ms {lp.get('p95', 0)}",
+        "# HELP doc_processor_duration_p99_ms P99 stage duration across all modules",
+        "# TYPE doc_processor_duration_p99_ms gauge",
+        f"doc_processor_duration_p99_ms {lp.get('p99', 0)}",
+    ]
+
+    # Per-module latency percentiles
+    lines += [
+        "# HELP doc_processor_stage_p95_ms P95 duration per pipeline stage",
+        "# TYPE doc_processor_stage_p95_ms gauge",
+    ]
+    for module, m in s.get("by_module", {}).items():
+        p95 = m.get("latency", {}).get("p95", 0)
+        lines.append(f'doc_processor_stage_p95_ms{{module="{module}"}} {p95}')
+
+    # Throughput
+    tput = s.get("throughput", {})
+    lines += [
+        "# HELP doc_processor_throughput_1m Events processed in the last 60 seconds",
+        "# TYPE doc_processor_throughput_1m gauge",
+        f"doc_processor_throughput_1m {tput.get('last_1m', 0)}",
+        "# HELP doc_processor_throughput_60m Events processed in the last 60 minutes",
+        "# TYPE doc_processor_throughput_60m gauge",
+        f"doc_processor_throughput_60m {tput.get('last_60m', 0)}",
+    ]
+
+    # Quality score
+    qs = s.get("avg_quality_score")
+    if qs is not None:
+        lines += [
+            "# HELP doc_processor_avg_quality_score Average document quality score (0-100)",
+            "# TYPE doc_processor_avg_quality_score gauge",
+            f"doc_processor_avg_quality_score {qs}",
+        ]
 
     return Response(
         content="\n".join(lines) + "\n",
