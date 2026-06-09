@@ -253,6 +253,7 @@ async def list_results(
     date_from: str | None = Query(None, description="ISO 8601 lower bound for created_at (inclusive)"),
     date_to: str | None = Query(None, description="ISO 8601 upper bound for created_at (inclusive)"),
     pinned: bool | None = Query(None, description="Filter by pin state (true=pinned only, false=unpinned only)"),
+    workflow_status: str | None = Query(None, description="Filter by workflow status (pending_review, approved, rejected, archived)"),
     sort_by: str = Query("created_at", description="Sort field: created_at, doc_type, filename, pipeline_status"),
     sort_order: str = Query("desc", description="Sort direction: asc or desc"),
     limit: int = Query(50, ge=1, le=200),
@@ -265,6 +266,7 @@ async def list_results(
             doc_type=doc_type, status=status, filename=filename,
             q=q, date_from=date_from, date_to=date_to,
             pinned=pinned,
+            workflow_status=workflow_status,
             sort_by=sort_by, sort_order=sort_order,
             limit=limit, offset=offset,
         )
@@ -342,6 +344,51 @@ async def get_result(document_id: UUID):
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
     return result
+
+
+# ---------------------------------------------------------------------------
+# Workflow status endpoints
+# ---------------------------------------------------------------------------
+
+class WorkflowStatusBody(BaseModel):
+    status: str
+
+
+@app.get("/results/{document_id}/workflow", dependencies=[Depends(require_api_key)])
+async def get_workflow_status(document_id: UUID):
+    """Return the current workflow status for a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    ws = await storage.get_workflow_status(document_id)
+    return {"document_id": str(document_id), "workflow_status": ws}
+
+
+@app.put("/results/{document_id}/workflow", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def set_workflow_status(document_id: UUID, body: WorkflowStatusBody):
+    """Set the workflow status. Allowed values: pending_review, approved, rejected, archived."""
+    if body.status not in storage.WORKFLOW_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid status. Allowed: {sorted(storage.WORKFLOW_STATUSES)}",
+        )
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.set_workflow_status(document_id, body.status)
+    await storage.append_audit(document_id, "workflow_status_set", f"status={body.status}")
+
+
+@app.delete("/results/{document_id}/workflow", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def clear_workflow_status(document_id: UUID):
+    """Clear the workflow status (set to null)."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.set_workflow_status(document_id, None)  # type: ignore[arg-type]
+    await storage.append_audit(document_id, "workflow_status_cleared")
 
 
 def _stage_summary(result: PipelineResult) -> dict:
