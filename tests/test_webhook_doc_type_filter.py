@@ -86,7 +86,7 @@ async def test_no_doc_types_filter_fires_for_any_type():
     result = _make_result("invoice")
     delivered: list = []
 
-    async def fake_deliver(w, event, payload):
+    async def fake_deliver(w, event, payload, document_id=None):
         delivered.append(w.url)
         return True
 
@@ -102,7 +102,7 @@ async def test_doc_types_filter_matches_type():
     result = _make_result("invoice")
     delivered: list = []
 
-    async def fake_deliver(w, event, payload):
+    async def fake_deliver(w, event, payload, document_id=None):
         delivered.append(w.url)
         return True
 
@@ -118,7 +118,7 @@ async def test_doc_types_filter_excludes_non_matching_type():
     result = _make_result("invoice")
     delivered: list = []
 
-    async def fake_deliver(w, event, payload):
+    async def fake_deliver(w, event, payload, document_id=None):
         delivered.append(w.url)
         return True
 
@@ -136,7 +136,7 @@ async def test_multiple_webhooks_selective_delivery():
     result = _make_result("invoice")
     delivered: list = []
 
-    async def fake_deliver(w, event, payload):
+    async def fake_deliver(w, event, payload, document_id=None):
         delivered.append(w.url)
         return True
 
@@ -159,7 +159,7 @@ async def test_doc_type_filter_with_none_doc_type():
     )
     delivered: list = []
 
-    async def fake_deliver(w, event, payload):
+    async def fake_deliver(w, event, payload, document_id=None):
         delivered.append(w.url)
         return True
 
