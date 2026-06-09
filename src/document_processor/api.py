@@ -289,6 +289,7 @@ async def list_results(
     date_to: str | None = Query(None, description="ISO 8601 upper bound for created_at (inclusive)"),
     pinned: bool | None = Query(None, description="Filter by pin state (true=pinned only, false=unpinned only)"),
     workflow_status: str | None = Query(None, description="Filter by workflow status (pending_review, approved, rejected, archived)"),
+    starred: bool | None = Query(None, description="Filter by star state (true=starred only, false=unstarred only)"),
     sort_by: str = Query("created_at", description="Sort field: created_at, doc_type, filename, pipeline_status"),
     sort_order: str = Query("desc", description="Sort direction: asc or desc"),
     limit: int = Query(50, ge=1, le=200),
@@ -302,6 +303,7 @@ async def list_results(
             q=q, date_from=date_from, date_to=date_to,
             pinned=pinned,
             workflow_status=workflow_status,
+            starred=starred,
             sort_by=sort_by, sort_order=sort_order,
             limit=limit, offset=offset,
         )
@@ -1153,6 +1155,40 @@ async def get_pin_state(document_id: UUID):
     if state is None:
         raise HTTPException(status_code=404, detail="Result not found")
     return {"pinned": state}
+
+
+# ---------------------------------------------------------------------------
+# Star / unstar endpoints
+# ---------------------------------------------------------------------------
+
+@app.put("/results/{document_id}/star", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def star_result(document_id: UUID):
+    """Mark a result as starred (favourite)."""
+    updated = await storage.set_starred(document_id, True)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.append_audit(document_id, "starred")
+
+
+@app.delete("/results/{document_id}/star", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def unstar_result(document_id: UUID):
+    """Remove the star from a result."""
+    state = await storage.is_starred(document_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.set_starred(document_id, False)
+    await storage.append_audit(document_id, "unstarred")
+
+
+@app.get("/results/{document_id}/star", dependencies=[Depends(require_api_key)])
+async def get_star_state(document_id: UUID):
+    """Return the star state of a result."""
+    state = await storage.is_starred(document_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    return {"starred": state}
 
 
 # ---------------------------------------------------------------------------
