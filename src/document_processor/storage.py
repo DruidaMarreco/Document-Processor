@@ -1596,6 +1596,33 @@ async def get_webhook_deliveries(
     ], total
 
 
+async def get_webhook_delivery(delivery_id: int) -> dict | None:
+    """Fetch a single webhook delivery record by its integer ID."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_WEBHOOK_DELIVERIES)
+        await db.commit()
+        async with db.execute(
+            """SELECT id, webhook_id, event, document_id, attempt, status_code, success, error, delivered_at
+               FROM webhook_deliveries WHERE id = ?""",
+            (delivery_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "webhook_id": row[1],
+        "event": row[2],
+        "document_id": row[3],
+        "attempt": row[4],
+        "status_code": row[5],
+        "success": bool(row[6]),
+        "error": row[7],
+        "delivered_at": row[8],
+    }
+
+
 async def get_webhook_delivery_stats(webhook_id: str) -> dict:
     _ensure_dir()
     async with aiosqlite.connect(_db_path()) as db:

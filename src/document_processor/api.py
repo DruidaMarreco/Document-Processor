@@ -767,6 +767,54 @@ async def webhook_delivery_stats(webhook_id: UUID):
     return {"webhook_id": str(webhook_id), **stats}
 
 
+@app.post("/webhooks/{webhook_id}/deliveries/{delivery_id}/replay",
+          dependencies=[Depends(require_api_key)])
+async def replay_webhook_delivery(webhook_id: UUID, delivery_id: int):
+    """Re-send a prior webhook delivery using the same event and document payload."""
+    from document_processor.webhook_delivery import _deliver_one
+
+    wh = await storage.get_webhook(webhook_id)
+    if not wh:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    delivery = await storage.get_webhook_delivery(delivery_id)
+    if not delivery or delivery["webhook_id"] != str(webhook_id):
+        raise HTTPException(status_code=404, detail="Delivery not found")
+
+    doc_id_str: str | None = delivery["document_id"]
+    result = None
+    if doc_id_str:
+        try:
+            result = await storage.get_result(__import__("uuid").UUID(doc_id_str))
+        except Exception:
+            pass
+
+    if result is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Original document no longer exists; cannot reconstruct payload",
+        )
+
+    import json as _json
+    from datetime import datetime, timezone
+    payload = _json.dumps({
+        "event": delivery["event"],
+        "document_id": doc_id_str,
+        "status": result.status,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "result": result.model_dump(mode="json"),
+    }).encode()
+
+    success = await _deliver_one(wh, delivery["event"], payload, doc_id_str)
+    return {
+        "webhook_id": str(webhook_id),
+        "original_delivery_id": delivery_id,
+        "event": delivery["event"],
+        "document_id": doc_id_str,
+        "success": success,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Document notes
 # ---------------------------------------------------------------------------
