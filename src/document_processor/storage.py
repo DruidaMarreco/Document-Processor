@@ -966,6 +966,41 @@ async def remove_tag(result_id: UUID, tag: str) -> bool:
     return (cursor.rowcount or 0) > 0
 
 
+async def get_tag_stats() -> list[dict]:
+    """Return all tags with their result-count, sorted by count descending."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_TAGS)
+        await db.commit()
+        async with db.execute(
+            "SELECT tag, COUNT(*) as cnt FROM tags GROUP BY tag ORDER BY cnt DESC, tag ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"tag": r[0], "count": r[1]} for r in rows]
+
+
+async def get_all_tags(prefix: str | None = None, limit: int = 50) -> list[str]:
+    """Return unique tag names, optionally filtered by prefix, ordered alphabetically."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_TAGS)
+        await db.commit()
+        if prefix:
+            pattern = prefix.strip().lower() + "%"
+            async with db.execute(
+                "SELECT DISTINCT tag FROM tags WHERE tag LIKE ? ORDER BY tag LIMIT ?",
+                (pattern, limit),
+            ) as cur:
+                rows = await cur.fetchall()
+        else:
+            async with db.execute(
+                "SELECT DISTINCT tag FROM tags ORDER BY tag LIMIT ?",
+                (limit,),
+            ) as cur:
+                rows = await cur.fetchall()
+    return [r[0] for r in rows]
+
+
 async def search_results_by_tag(
     tag: str,
     limit: int = 50,
