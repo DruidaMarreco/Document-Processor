@@ -24,7 +24,8 @@ _DDL_RESULTS = """
         data            TEXT NOT NULL,
         created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         pinned          INTEGER NOT NULL DEFAULT 0,
-        workflow_status TEXT
+        workflow_status TEXT,
+        locked          INTEGER NOT NULL DEFAULT 0
     )
 """
 _DDL_DOCUMENTS = """
@@ -179,6 +180,7 @@ _MIGRATION_COLUMNS = [
     ("filename",         "TEXT"),
     ("pinned",           "INTEGER NOT NULL DEFAULT 0"),
     ("workflow_status",  "TEXT"),
+    ("locked",           "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 WORKFLOW_STATUSES = {"pending_review", "approved", "rejected", "archived"}
@@ -1125,6 +1127,32 @@ async def is_pinned(result_id: UUID) -> bool | None:
         await db.commit()
         async with db.execute(
             "SELECT pinned FROM results WHERE id = ?", (str(result_id),)
+        ) as cur:
+            row = await cur.fetchone()
+    return bool(row[0]) if row is not None else None
+
+
+async def set_result_locked(result_id: UUID, locked: bool) -> bool:
+    """Lock or unlock a result. Returns False if the result does not exist."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        cursor = await db.execute(
+            "UPDATE results SET locked = ? WHERE id = ?",
+            (1 if locked else 0, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def is_result_locked(result_id: UUID) -> bool | None:
+    """Return lock state, or None if result does not exist."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            "SELECT locked FROM results WHERE id = ?", (str(result_id),)
         ) as cur:
             row = await cur.fetchone()
     return bool(row[0]) if row is not None else None

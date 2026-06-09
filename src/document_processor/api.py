@@ -364,6 +364,8 @@ async def reprocess_document(document_id: UUID, background_tasks: BackgroundTask
             detail="Original document content not found. "
                    "Only documents uploaded via /process, /process/stream, or /batch can be reprocessed.",
         )
+    if await storage.is_result_locked(document_id):
+        raise HTTPException(status_code=423, detail="Result is locked")
     pipeline = registry.build_pipeline()
     result = await pipeline.run(document)
     await storage.save_result(result, document=document)
@@ -540,6 +542,8 @@ async def delete_result(document_id: UUID):
     result = await storage.get_result(document_id)
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
+    if await storage.is_result_locked(document_id):
+        raise HTTPException(status_code=423, detail="Result is locked")
     await storage.append_audit(document_id, "deleted")
     await storage.delete_result(document_id)
 
@@ -1046,6 +1050,40 @@ async def get_pin_state(document_id: UUID):
     if state is None:
         raise HTTPException(status_code=404, detail="Result not found")
     return {"pinned": state}
+
+
+# ---------------------------------------------------------------------------
+# Lock / unlock endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/results/{document_id}/lock", status_code=204,
+          dependencies=[Depends(require_api_key)])
+async def lock_result(document_id: UUID):
+    """Lock a result, preventing delete, reprocess, and write operations."""
+    updated = await storage.set_result_locked(document_id, True)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.append_audit(document_id, "locked")
+
+
+@app.post("/results/{document_id}/unlock", status_code=204,
+          dependencies=[Depends(require_api_key)])
+async def unlock_result(document_id: UUID):
+    """Unlock a previously locked result."""
+    state = await storage.is_result_locked(document_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.set_result_locked(document_id, False)
+    await storage.append_audit(document_id, "unlocked")
+
+
+@app.get("/results/{document_id}/lock", dependencies=[Depends(require_api_key)])
+async def get_lock_state(document_id: UUID):
+    """Return the lock state of a result."""
+    state = await storage.is_result_locked(document_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    return {"locked": state}
 
 
 # ---------------------------------------------------------------------------
