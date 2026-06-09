@@ -499,6 +499,28 @@ async def bulk_tag_results(body: BulkTagBody):
     return {"updated": updated, "requested": len(body.ids)}
 
 
+class BatchExportBody(BaseModel):
+    ids: list[UUID]
+    format: str = "json"
+
+
+@app.post("/results/batch-export", dependencies=[Depends(require_api_key)])
+async def batch_export_results(body: BatchExportBody):
+    """Export up to 100 results as a ZIP archive in the requested format."""
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="ids must not be empty")
+    if len(body.ids) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 ids per request")
+    if body.format not in ("json", "csv", "markdown", "xml"):
+        raise HTTPException(status_code=400, detail="format must be json, csv, markdown, or xml")
+    zip_bytes = await storage.batch_export_zip(body.ids, format=body.format)
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="export.zip"'},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tagging endpoints
 # ---------------------------------------------------------------------------
