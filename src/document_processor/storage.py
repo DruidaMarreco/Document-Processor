@@ -25,7 +25,8 @@ _DDL_RESULTS = """
         created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         pinned          INTEGER NOT NULL DEFAULT 0,
         workflow_status TEXT,
-        locked          INTEGER NOT NULL DEFAULT 0
+        locked          INTEGER NOT NULL DEFAULT 0,
+        starred         INTEGER NOT NULL DEFAULT 0
     )
 """
 _DDL_DOCUMENTS = """
@@ -197,6 +198,7 @@ _MIGRATION_COLUMNS = [
     ("pinned",           "INTEGER NOT NULL DEFAULT 0"),
     ("workflow_status",  "TEXT"),
     ("locked",           "INTEGER NOT NULL DEFAULT 0"),
+    ("starred",          "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 WORKFLOW_STATUSES = {"pending_review", "approved", "rejected", "archived"}
@@ -358,6 +360,7 @@ async def search_results(
     date_to: str | None = None,
     pinned: bool | None = None,
     workflow_status: str | None = None,
+    starred: bool | None = None,
     sort_by: str = "created_at",
     sort_order: str = "desc",
     limit: int = 50,
@@ -390,6 +393,9 @@ async def search_results(
     if workflow_status is not None:
         conditions.append("workflow_status = ?")
         params.append(workflow_status)
+    if starred is not None:
+        conditions.append("starred = ?")
+        params.append(1 if starred else 0)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     col = sort_by if sort_by in _SORT_COLUMNS else "created_at"
@@ -1208,6 +1214,32 @@ async def is_pinned(result_id: UUID) -> bool | None:
         await db.commit()
         async with db.execute(
             "SELECT pinned FROM results WHERE id = ?", (str(result_id),)
+        ) as cur:
+            row = await cur.fetchone()
+    return bool(row[0]) if row is not None else None
+
+
+async def set_starred(result_id: UUID, starred: bool) -> bool:
+    """Star or unstar a result. Returns False if the result does not exist."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        cursor = await db.execute(
+            "UPDATE results SET starred = ? WHERE id = ?",
+            (1 if starred else 0, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def is_starred(result_id: UUID) -> bool | None:
+    """Return starred state, or None if result does not exist."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            "SELECT starred FROM results WHERE id = ?", (str(result_id),)
         ) as cur:
             row = await cur.fetchone()
     return bool(row[0]) if row is not None else None
