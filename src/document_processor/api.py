@@ -21,6 +21,7 @@ from document_processor import registry, storage
 from document_processor.auth import require_api_key
 from document_processor.config import settings
 from document_processor.job_worker import run_worker
+from document_processor.scheduler import run_scheduler
 from document_processor.models import ApiKey, ApiKeyInfo, Document, JobRecord, PipelineResult, WebhookConfig
 from document_processor.retention import run_retention
 from document_processor.webhook_delivery import fire_webhooks
@@ -36,7 +37,8 @@ _job_queue: asyncio.Queue = asyncio.Queue()
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     await storage.init_db()
-    tasks = [asyncio.create_task(run_worker(_job_queue))]
+    tasks = [asyncio.create_task(run_worker(_job_queue)),
+             asyncio.create_task(run_scheduler(_job_queue))]
     if settings.retention_days > 0:
         tasks.append(asyncio.create_task(run_retention(settings.retention_days)))
     yield
@@ -675,6 +677,58 @@ async def get_audit_log(
         raise HTTPException(status_code=404, detail="Result not found")
     entries = await storage.get_audit_log(document_id, limit=limit)
     return {"document_id": str(document_id), "entries": entries}
+
+
+# ---------------------------------------------------------------------------
+# Scheduled processing
+# ---------------------------------------------------------------------------
+
+@app.post("/schedule", status_code=201, dependencies=[Depends(require_api_key)])
+@limiter.limit("30/minute")
+async def schedule_document(
+    request: Request,
+    file: UploadFile = File(...),
+    run_at: str = Query(..., description="ISO 8601 datetime when to process (e.g. 2026-06-10T09:00:00Z)"),
+    config: str | None = Form(None, description="Optional JSON pipeline config overrides"),
+):
+    """Schedule a document for processing at a future time."""
+    from uuid import uuid4 as _uuid4
+    content = await file.read()
+    document = Document(
+        filename=file.filename,
+        mimetype=file.content_type or "application/octet-stream",
+        content=content,
+    )
+    sched_id = str(_uuid4())
+    cfg = _parse_config(config) or None
+    result = await storage.create_scheduled_job(sched_id, run_at, document, config=cfg)
+    return result
+
+
+@app.get("/schedule", dependencies=[Depends(require_api_key)])
+async def list_scheduled(
+    status: str | None = Query(None, description="Filter by status: pending, dispatched, failed"),
+):
+    return await storage.list_scheduled_jobs(status=status)
+
+
+@app.get("/schedule/{scheduled_id}", dependencies=[Depends(require_api_key)])
+async def get_scheduled(scheduled_id: str):
+    job = await storage.get_scheduled_job(scheduled_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Scheduled job not found")
+    return job
+
+
+@app.delete("/schedule/{scheduled_id}", status_code=204, dependencies=[Depends(require_api_key)])
+async def cancel_scheduled(scheduled_id: str):
+    """Cancel a pending scheduled job. Returns 409 if already dispatched."""
+    sched = await storage.get_scheduled_job(scheduled_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Scheduled job not found")
+    if sched["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"Cannot cancel: status is '{sched['status']}'")
+    await storage.delete_scheduled_job(scheduled_id)
 
 
 # ---------------------------------------------------------------------------
