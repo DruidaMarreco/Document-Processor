@@ -263,6 +263,21 @@ async def results_stats_error_rates():
     return {"error_rates": await storage.get_stats_error_rates()}
 
 
+@app.get("/results/stats/tags", dependencies=[Depends(require_api_key)])
+async def results_stats_tags():
+    """Return all tags with their result-count, sorted by count descending."""
+    return {"tags": await storage.get_tag_stats()}
+
+
+@app.get("/results/tags", dependencies=[Depends(require_api_key)])
+async def list_all_tags(
+    q: str | None = Query(None, description="Prefix filter for tag autocomplete"),
+    limit: int = Query(50, ge=1, le=200, description="Maximum number of tags to return"),
+):
+    """Return unique tag names, optionally filtered by prefix. Useful for autocomplete."""
+    return {"tags": await storage.get_all_tags(prefix=q, limit=limit)}
+
+
 @app.get("/results", dependencies=[Depends(require_api_key)])
 async def list_results(
     doc_type: str | None = Query(None, description="Filter by document type (invoice, contract, …)"),
