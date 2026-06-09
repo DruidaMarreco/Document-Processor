@@ -83,6 +83,14 @@ _DDL_METADATA = """
         PRIMARY KEY (result_id, key)
     )
 """
+_DDL_REACTIONS = """
+    CREATE TABLE IF NOT EXISTS result_reactions (
+        result_id  TEXT NOT NULL,
+        emoji      TEXT NOT NULL,
+        count      INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (result_id, emoji)
+    )
+"""
 _DDL_LABELS = """
     CREATE TABLE IF NOT EXISTS labels (
         name        TEXT PRIMARY KEY,
@@ -230,6 +238,7 @@ _MIGRATION_COLUMNS = [
 
 WORKFLOW_STATUSES = {"pending_review", "approved", "rejected", "archived"}
 PRIORITY_LEVELS = {"low", "medium", "high", "critical"}
+ALLOWED_REACTIONS = {"+1", "-1", "eyes", "check", "red_circle"}
 _MIGRATION_DOCUMENTS_COLUMNS = [
     ("content_hash", "TEXT"),
 ]
@@ -273,6 +282,7 @@ async def init_db() -> None:
         await db.execute(_DDL_API_KEY_QUOTAS)
         await db.execute(_DDL_LABELS)
         await db.execute(_DDL_RESULT_LABELS)
+        await db.execute(_DDL_REACTIONS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -2478,6 +2488,56 @@ async def get_stats_error_rates() -> list[dict]:
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Result reactions
+# ---------------------------------------------------------------------------
+
+async def add_reaction(result_id: UUID, emoji: str) -> dict:
+    """Increment (or initialise) a reaction counter. Returns updated counts for the result."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_REACTIONS)
+        await db.execute(
+            """INSERT INTO result_reactions (result_id, emoji, count) VALUES (?, ?, 1)
+               ON CONFLICT(result_id, emoji) DO UPDATE SET count = count + 1""",
+            (str(result_id), emoji),
+        )
+        await db.commit()
+    return await get_reactions(result_id)
+
+
+async def remove_reaction(result_id: UUID, emoji: str) -> dict:
+    """Decrement a reaction counter (floor 0; removes row at zero). Returns updated counts."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_REACTIONS)
+        await db.execute(
+            "UPDATE result_reactions SET count = MAX(0, count - 1) "
+            "WHERE result_id = ? AND emoji = ?",
+            (str(result_id), emoji),
+        )
+        await db.execute(
+            "DELETE FROM result_reactions WHERE result_id = ? AND emoji = ? AND count = 0",
+            (str(result_id), emoji),
+        )
+        await db.commit()
+    return await get_reactions(result_id)
+
+
+async def get_reactions(result_id: UUID) -> dict:
+    """Return reaction counts keyed by emoji for a result."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_REACTIONS)
+        await db.commit()
+        async with db.execute(
+            "SELECT emoji, count FROM result_reactions WHERE result_id = ? ORDER BY emoji",
+            (str(result_id),),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {r[0]: r[1] for r in rows}
 
 
 # ---------------------------------------------------------------------------
