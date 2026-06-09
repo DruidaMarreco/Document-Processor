@@ -825,6 +825,28 @@ async def resume_webhook(webhook_id: UUID):
         raise HTTPException(status_code=404, detail="Webhook not found")
 
 
+@app.post("/webhooks/{webhook_id}/ping", dependencies=[Depends(require_api_key)])
+async def ping_webhook(webhook_id: UUID):
+    """Send a test ping to the webhook URL to verify it is reachable."""
+    from document_processor.webhook_delivery import _deliver_one
+    from datetime import datetime, timezone
+    import json as _json
+
+    wh = await storage.get_webhook(webhook_id)
+    if not wh:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    payload = _json.dumps({
+        "event": "ping",
+        "webhook_id": str(webhook_id),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "message": "This is a test ping from the Document Processor.",
+    }).encode()
+
+    success = await _deliver_one(wh, "ping", payload, document_id=None)
+    return {"webhook_id": str(webhook_id), "success": success}
+
+
 @app.get("/webhooks/{webhook_id}/deliveries", dependencies=[Depends(require_api_key)])
 async def list_webhook_deliveries(
     webhook_id: UUID,
