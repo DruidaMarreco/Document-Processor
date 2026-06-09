@@ -84,6 +84,16 @@ _DDL_METADATA = """
         PRIMARY KEY (result_id, key)
     )
 """
+_DDL_RESULT_COSTS = """
+    CREATE TABLE IF NOT EXISTS result_costs (
+        result_id          TEXT PRIMARY KEY,
+        input_tokens       INTEGER NOT NULL DEFAULT 0,
+        output_tokens      INTEGER NOT NULL DEFAULT 0,
+        model              TEXT,
+        estimated_cost_usd REAL,
+        created_at         TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_ATTACHMENTS = """
     CREATE TABLE IF NOT EXISTS result_attachments (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -328,6 +338,7 @@ async def init_db() -> None:
         await db.execute(_DDL_REACTIONS)
         await db.execute(_DDL_CHECKLIST)
         await db.execute(_DDL_BOOKMARKS)
+        await db.execute(_DDL_RESULT_COSTS)
         await db.execute(_DDL_ATTACHMENTS)
         await db.execute(_DDL_RESULTS_FTS)
         # Add columns that may not exist in older databases
@@ -571,6 +582,95 @@ async def fts_search(query: str, limit: int = 20, offset: int = 0) -> list[str]:
             )
         ).fetchall()
     return [r[0] for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Processing cost tracking
+# ---------------------------------------------------------------------------
+
+# Haiku 4.5 pricing (USD per token)
+_INPUT_COST_PER_TOKEN = 1.0 / 1_000_000   # $1.00 / 1M
+_OUTPUT_COST_PER_TOKEN = 5.0 / 1_000_000  # $5.00 / 1M
+
+
+def _estimate_cost(input_tokens: int, output_tokens: int) -> float:
+    return round(
+        input_tokens * _INPUT_COST_PER_TOKEN + output_tokens * _OUTPUT_COST_PER_TOKEN,
+        8,
+    )
+
+
+async def save_result_cost(
+    result_id: UUID,
+    input_tokens: int,
+    output_tokens: int,
+    model: str,
+) -> dict:
+    """Upsert the LLM cost record for a result."""
+    _ensure_dir()
+    cost = _estimate_cost(input_tokens, output_tokens)
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULT_COSTS)
+        await db.execute(
+            """INSERT INTO result_costs (result_id, input_tokens, output_tokens, model, estimated_cost_usd)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(result_id) DO UPDATE SET
+                   input_tokens = excluded.input_tokens,
+                   output_tokens = excluded.output_tokens,
+                   model = excluded.model,
+                   estimated_cost_usd = excluded.estimated_cost_usd""",
+            (str(result_id), input_tokens, output_tokens, model, cost),
+        )
+        await db.commit()
+    return {
+        "result_id": str(result_id),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "model": model,
+        "estimated_cost_usd": cost,
+    }
+
+
+async def get_result_cost(result_id: UUID) -> dict | None:
+    """Return cost record for a result, or None if not tracked."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULT_COSTS)
+        row = await (
+            await db.execute(
+                "SELECT result_id, input_tokens, output_tokens, model, estimated_cost_usd, created_at FROM result_costs WHERE result_id = ?",
+                (str(result_id),),
+            )
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "result_id": row[0],
+        "input_tokens": row[1],
+        "output_tokens": row[2],
+        "model": row[3],
+        "estimated_cost_usd": row[4],
+        "created_at": row[5],
+    }
+
+
+async def get_aggregate_cost(limit: int = 100, offset: int = 0) -> dict:
+    """Return aggregate token usage and cost across all tracked results."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULT_COSTS)
+        row = await (
+            await db.execute(
+                "SELECT COUNT(*), SUM(input_tokens), SUM(output_tokens), SUM(estimated_cost_usd) FROM result_costs"
+            )
+        ).fetchone()
+    count = row[0] or 0
+    return {
+        "tracked_results": count,
+        "total_input_tokens": row[1] or 0,
+        "total_output_tokens": row[2] or 0,
+        "total_estimated_cost_usd": round(row[3] or 0.0, 8),
+    }
 
 
 async def bulk_delete_results(document_ids: list[UUID]) -> int:

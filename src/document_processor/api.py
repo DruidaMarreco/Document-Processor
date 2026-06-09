@@ -18,6 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from document_processor import registry, storage
+from llm_client.client import get_llm_usage, start_usage_tracking
 from document_processor.auth import require_api_key
 from document_processor.config import settings
 from document_processor.job_worker import run_worker
@@ -90,6 +91,20 @@ async def _notify_webhooks(event: str, result: PipelineResult) -> None:
     await fire_webhooks(webhooks, event, result)
 
 
+async def _save_cost(result: PipelineResult) -> None:
+    usage = get_llm_usage()
+    if not usage:
+        return
+    total_input = sum(e["input_tokens"] for e in usage)
+    total_output = sum(e["output_tokens"] for e in usage)
+    model = usage[0]["model"] if usage else "unknown"
+    await storage.save_result_cost(result.document_id, total_input, total_output, model)
+
+
+def _store_cost_background(result: PipelineResult, background_tasks: BackgroundTasks) -> None:
+    background_tasks.add_task(_save_cost, result)
+
+
 def _parse_config(raw: str | None) -> dict:
     if not raw:
         return {}
@@ -138,8 +153,10 @@ async def process_document(
     )
     pipeline = registry.build_pipeline()
     seed_ctx = {"_config": await _resolve_config(config, template)}
+    start_usage_tracking()
     result = await pipeline.run(document, context=seed_ctx)
     await storage.save_result(result, document=document)
+    _store_cost_background(result, background_tasks)
     await storage.append_audit(result.document_id, "processed",
                                f"status={result.status} filename={file.filename}")
     event = "document.processed" if result.status != "failed" else "document.failed"
@@ -273,6 +290,25 @@ async def results_stats_tags():
 async def results_stats_summary():
     """Rich aggregate dashboard: flags, priority/workflow breakdown, top tags/labels, time windows."""
     return await storage.get_processing_summary()
+
+
+@app.get("/results/stats/cost", dependencies=[Depends(require_api_key)])
+async def aggregate_cost():
+    """Return aggregate LLM token usage and estimated cost across all tracked results."""
+    return await storage.get_aggregate_cost()
+
+
+@app.get("/results/{document_id}/cost", dependencies=[Depends(require_api_key)])
+async def get_result_cost(document_id: UUID):
+    """Return LLM token usage and estimated cost for a single result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    cost = await storage.get_result_cost(document_id)
+    if cost is None:
+        return {"result_id": str(document_id), "tracked": False,
+                "input_tokens": 0, "output_tokens": 0, "estimated_cost_usd": 0.0}
+    return {**cost, "tracked": True}
 
 
 @app.get("/results/search", dependencies=[Depends(require_api_key)])
