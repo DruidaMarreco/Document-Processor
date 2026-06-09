@@ -49,6 +49,14 @@ _DDL_NOTES = """
         updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_COMMENTS = """
+    CREATE TABLE IF NOT EXISTS result_comments (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_id  TEXT NOT NULL,
+        text       TEXT NOT NULL,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_AUDIT = """
     CREATE TABLE IF NOT EXISTS audit_log (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -185,6 +193,7 @@ async def init_db() -> None:
         await db.execute(_DDL_COLLECTIONS)
         await db.execute(_DDL_COLLECTION_MEMBERS)
         await db.execute(_DDL_WEBHOOK_DELIVERIES)
+        await db.execute(_DDL_COMMENTS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -1536,3 +1545,61 @@ async def get_webhook_delivery_stats(webhook_id: str) -> dict:
         "success_rate": success_rate,
         "avg_attempts": avg_attempts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Result comments
+# ---------------------------------------------------------------------------
+
+async def add_comment(result_id: UUID, text: str) -> dict:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_COMMENTS)
+        cursor = await db.execute(
+            "INSERT INTO result_comments (result_id, text) VALUES (?, ?)",
+            (str(result_id), text),
+        )
+        row_id = cursor.lastrowid
+        await db.commit()
+        async with db.execute(
+            "SELECT id, result_id, text, created_at FROM result_comments WHERE id = ?",
+            (row_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return {"id": row[0], "result_id": row[1], "text": row[2], "created_at": row[3]}
+
+
+async def get_comments(
+    result_id: UUID, limit: int = 50, offset: int = 0
+) -> tuple[list[dict], int]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_COMMENTS)
+        await db.commit()
+        async with db.execute(
+            "SELECT COUNT(*) FROM result_comments WHERE result_id = ?",
+            (str(result_id),),
+        ) as cur:
+            total: int = (await cur.fetchone())[0]  # type: ignore[index]
+        async with db.execute(
+            """SELECT id, result_id, text, created_at FROM result_comments
+               WHERE result_id = ? ORDER BY id ASC LIMIT ? OFFSET ?""",
+            (str(result_id), limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {"id": r[0], "result_id": r[1], "text": r[2], "created_at": r[3]}
+        for r in rows
+    ], total
+
+
+async def delete_comment(result_id: UUID, comment_id: int) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_COMMENTS)
+        cursor = await db.execute(
+            "DELETE FROM result_comments WHERE id = ? AND result_id = ?",
+            (comment_id, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
