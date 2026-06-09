@@ -279,19 +279,35 @@ async def list_results(
 @app.get("/results/{document_id}/export", dependencies=[Depends(require_api_key)])
 async def export_result(
     document_id: UUID,
-    format: str = Query("json", description="Export format: json or csv"),
+    format: str = Query("json", description="Export format: json, csv, markdown, or xml"),
 ):
     result = await storage.get_result(document_id)
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
 
     if format == "csv":
-        csv_content = storage.result_to_csv(result)
         return Response(
-            content=csv_content,
+            content=storage.result_to_csv(result),
             media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="{document_id}.csv"'},
         )
+
+    if format == "markdown":
+        return Response(
+            content=storage.result_to_markdown(result),
+            media_type="text/markdown",
+            headers={"Content-Disposition": f'attachment; filename="{document_id}.md"'},
+        )
+
+    if format == "xml":
+        return Response(
+            content=storage.result_to_xml(result),
+            media_type="application/xml",
+            headers={"Content-Disposition": f'attachment; filename="{document_id}.xml"'},
+        )
+
+    if format != "json":
+        raise HTTPException(status_code=400, detail="format must be json, csv, markdown, or xml")
 
     return Response(
         content=result.model_dump_json(indent=2),
