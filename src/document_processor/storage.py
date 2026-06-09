@@ -2481,6 +2481,79 @@ async def get_stats_error_rates() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Processing summary dashboard
+# ---------------------------------------------------------------------------
+
+async def get_processing_summary() -> dict:
+    """Rich aggregate: flags, priority/workflow breakdown, top tags/labels, time windows."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.execute(_DDL_TAGS)
+        await db.execute(_DDL_LABELS)
+        await db.execute(_DDL_RESULT_LABELS)
+        await db.commit()
+
+        async with db.execute("SELECT COUNT(*) FROM results") as cur:
+            total: int = (await cur.fetchone())[0]  # type: ignore[index]
+
+        async with db.execute(
+            "SELECT priority, COUNT(*) FROM results GROUP BY priority"
+        ) as cur:
+            by_priority = {(r[0] or "none"): r[1] for r in await cur.fetchall()}
+
+        async with db.execute(
+            "SELECT workflow_status, COUNT(*) FROM results GROUP BY workflow_status"
+        ) as cur:
+            by_workflow = {(r[0] or "none"): r[1] for r in await cur.fetchall()}
+
+        async with db.execute("SELECT SUM(starred), SUM(pinned), SUM(locked) FROM results") as cur:
+            row = await cur.fetchone()
+            flag_counts = {
+                "starred": int(row[0] or 0),
+                "pinned": int(row[1] or 0),
+                "locked": int(row[2] or 0),
+            }
+
+        async with db.execute(
+            "SELECT COUNT(*) FROM results WHERE expires_at IS NOT NULL "
+            "AND expires_at <= strftime('%Y-%m-%dT%H:%M:%SZ', 'now')"
+        ) as cur:
+            expired_count: int = (await cur.fetchone())[0]  # type: ignore[index]
+
+        async with db.execute(
+            "SELECT tag, COUNT(*) AS cnt FROM tags GROUP BY tag ORDER BY cnt DESC LIMIT 10"
+        ) as cur:
+            top_tags = [{"tag": r[0], "count": r[1]} for r in await cur.fetchall()]
+
+        async with db.execute(
+            """SELECT l.name, l.color, COUNT(rl.result_id) AS cnt
+               FROM labels l LEFT JOIN result_labels rl ON l.name = rl.label_name
+               GROUP BY l.name ORDER BY cnt DESC LIMIT 10"""
+        ) as cur:
+            top_labels = [{"name": r[0], "color": r[1], "count": r[2]} for r in await cur.fetchall()]
+
+        windows = {}
+        for label, days in (("last_24h", 1), ("last_7d", 7), ("last_30d", 30)):
+            async with db.execute(
+                "SELECT COUNT(*) FROM results WHERE created_at >= "
+                f"strftime('%Y-%m-%dT%H:%M:%SZ', datetime('now', '-{days} day'))"
+            ) as cur:
+                windows[label] = (await cur.fetchone())[0]  # type: ignore[index]
+
+    return {
+        "total": total,
+        "expired": expired_count,
+        "flags": flag_counts,
+        "by_priority": by_priority,
+        "by_workflow_status": by_workflow,
+        "top_tags": top_tags,
+        "top_labels": top_labels,
+        "processed_windows": windows,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Result snapshots
 # ---------------------------------------------------------------------------
 
