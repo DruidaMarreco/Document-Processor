@@ -58,6 +58,18 @@ _DDL_AUDIT = """
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_SCHEDULED = """
+    CREATE TABLE IF NOT EXISTS scheduled_jobs (
+        id           TEXT PRIMARY KEY,
+        run_at       TEXT NOT NULL,
+        filename     TEXT,
+        mimetype     TEXT NOT NULL DEFAULT 'application/octet-stream',
+        config       TEXT,
+        status       TEXT NOT NULL DEFAULT 'pending',
+        job_id       TEXT,
+        created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_TEMPLATES = """
     CREATE TABLE IF NOT EXISTS processing_templates (
         name        TEXT PRIMARY KEY,
@@ -151,6 +163,7 @@ async def init_db() -> None:
         await db.execute(_DDL_TAGS)
         await db.execute(_DDL_NOTES)
         await db.execute(_DDL_AUDIT)
+        await db.execute(_DDL_SCHEDULED)
         await db.execute(_DDL_TEMPLATES)
         await db.execute(_DDL_COLLECTIONS)
         await db.execute(_DDL_COLLECTION_MEMBERS)
@@ -863,6 +876,132 @@ async def is_pinned(result_id: UUID) -> bool | None:
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Scheduled processing
+# ---------------------------------------------------------------------------
+
+async def create_scheduled_job(
+    scheduled_id: str,
+    run_at: str,
+    document: "Document",
+    config: dict | None = None,
+) -> dict:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_SCHEDULED)
+        await db.execute(_DDL_DOCUMENTS)
+        await db.execute(
+            """INSERT INTO scheduled_jobs (id, run_at, filename, mimetype, config)
+               VALUES (?, ?, ?, ?, ?)""",
+            (scheduled_id, run_at, document.filename, document.mimetype,
+             json.dumps(config) if config else None),
+        )
+        await db.execute(
+            """INSERT OR REPLACE INTO documents (id, filename, mimetype, content, content_hash)
+               VALUES (?, ?, ?, ?, ?)""",
+            (scheduled_id, document.filename, document.mimetype, document.content,
+             _content_hash(document.content)),
+        )
+        await db.commit()
+    return {"id": scheduled_id, "run_at": run_at, "status": "pending",
+            "filename": document.filename}
+
+
+async def list_scheduled_jobs(status: str | None = None) -> list[dict]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_SCHEDULED)
+        await db.commit()
+        where = "WHERE status = ?" if status else ""
+        params = [status] if status else []
+        async with db.execute(
+            f"SELECT id, run_at, filename, mimetype, config, status, job_id, created_at "
+            f"FROM scheduled_jobs {where} ORDER BY run_at ASC",
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {"id": r[0], "run_at": r[1], "filename": r[2], "mimetype": r[3],
+         "config": json.loads(r[4]) if r[4] else None, "status": r[5],
+         "job_id": r[6], "created_at": r[7]}
+        for r in rows
+    ]
+
+
+async def get_scheduled_job(scheduled_id: str) -> dict | None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_SCHEDULED)
+        await db.commit()
+        async with db.execute(
+            "SELECT id, run_at, filename, mimetype, config, status, job_id, created_at "
+            "FROM scheduled_jobs WHERE id = ?",
+            (scheduled_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "run_at": row[1], "filename": row[2], "mimetype": row[3],
+            "config": json.loads(row[4]) if row[4] else None, "status": row[5],
+            "job_id": row[6], "created_at": row[7]}
+
+
+async def delete_scheduled_job(scheduled_id: str) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_SCHEDULED)
+        cursor = await db.execute(
+            "DELETE FROM scheduled_jobs WHERE id = ? AND status = 'pending'",
+            (scheduled_id,),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def claim_due_scheduled_jobs(now: str) -> list[dict]:
+    """Atomically mark due pending jobs as 'dispatched' and return them."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_SCHEDULED)
+        await db.commit()
+        async with db.execute(
+            "SELECT id FROM scheduled_jobs WHERE status = 'pending' AND run_at <= ?",
+            (now,),
+        ) as cur:
+            ids = [r[0] for r in await cur.fetchall()]
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        await db.execute(
+            f"UPDATE scheduled_jobs SET status = 'dispatched' WHERE id IN ({placeholders})",
+            ids,
+        )
+        await db.commit()
+        async with db.execute(
+            f"SELECT id, run_at, filename, mimetype, config, status, job_id, created_at "
+            f"FROM scheduled_jobs WHERE id IN ({placeholders})",
+            ids,
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {"id": r[0], "run_at": r[1], "filename": r[2], "mimetype": r[3],
+         "config": json.loads(r[4]) if r[4] else None, "status": r[5],
+         "job_id": r[6], "created_at": r[7]}
+        for r in rows
+    ]
+
+
+async def update_scheduled_job_status(scheduled_id: str, status: str, job_id: str | None = None) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_SCHEDULED)
+        await db.execute(
+            "UPDATE scheduled_jobs SET status = ?, job_id = COALESCE(?, job_id) WHERE id = ?",
+            (status, job_id, scheduled_id),
+        )
+        await db.commit()
+
 
 # ---------------------------------------------------------------------------
 # Processing templates
