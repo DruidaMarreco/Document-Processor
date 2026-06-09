@@ -25,9 +25,9 @@ class Pipeline:
             except Exception as exc:
                 logger.warning("pipeline.listener.error", error=str(exc))
 
-    async def run(self, document: Document) -> PipelineResult:
+    async def run(self, document: Document, context: dict | None = None) -> PipelineResult:
         start = time.monotonic()
-        context: dict = {}
+        context = dict(context) if context else {}
         stage_results: list[StageResult] = []
         failed = False
 
