@@ -326,6 +326,79 @@ async def get_result(document_id: UUID):
     return result
 
 
+def _stage_summary(result: PipelineResult) -> dict:
+    """Flatten stage data into a summary dict for diffing."""
+    summary: dict = {
+        "document_id": str(result.document_id),
+        "status": result.status,
+        "total_duration_ms": result.total_duration_ms,
+    }
+    for stage in result.stages:
+        summary[stage.module] = {
+            "status": stage.status,
+            "data": stage.data,
+            "errors": stage.errors,
+        }
+    return summary
+
+
+def _diff_values(a, b) -> dict:
+    if a == b:
+        return {"changed": False, "left": a, "right": b}
+    return {"changed": True, "left": a, "right": b}
+
+
+def _diff_dicts(left: dict, right: dict) -> dict:
+    all_keys = set(left) | set(right)
+    return {
+        k: _diff_values(left.get(k), right.get(k))
+        for k in sorted(all_keys)
+    }
+
+
+@app.get("/results/{document_id}/diff/{other_id}", dependencies=[Depends(require_api_key)])
+async def diff_results(document_id: UUID, other_id: UUID):
+    """Compare two pipeline results. Returns per-field diff (changed, left, right)."""
+    left, right = await asyncio.gather(
+        storage.get_result(document_id),
+        storage.get_result(other_id),
+    )
+    if not left:
+        raise HTTPException(status_code=404, detail=f"Result {document_id} not found")
+    if not right:
+        raise HTTPException(status_code=404, detail=f"Result {other_id} not found")
+
+    left_summary = _stage_summary(left)
+    right_summary = _stage_summary(right)
+
+    top_keys = {"document_id", "status", "total_duration_ms"}
+    top_diff = {k: _diff_values(left_summary.get(k), right_summary.get(k)) for k in top_keys}
+
+    stage_names = {s.module for s in left.stages} | {s.module for s in right.stages}
+    stage_diff: dict = {}
+    for name in sorted(stage_names):
+        ls = left_summary.get(name, {})
+        rs = right_summary.get(name, {})
+        stage_diff[name] = {
+            "status": _diff_values(ls.get("status"), rs.get("status")),
+            "data": _diff_dicts(ls.get("data") or {}, rs.get("data") or {}),
+        }
+
+    changed_count = sum(
+        1 for v in {**top_diff, **{k: v for s in stage_diff.values()
+                                    for k, v in s.get("data", {}).items()}}.values()
+        if isinstance(v, dict) and v.get("changed")
+    )
+
+    return {
+        "left_id": str(document_id),
+        "right_id": str(other_id),
+        "changed_fields": changed_count,
+        "top": top_diff,
+        "stages": stage_diff,
+    }
+
+
 @app.delete("/results/{document_id}", status_code=204, dependencies=[Depends(require_api_key)])
 async def delete_result(document_id: UUID):
     """Delete a stored result and its original document bytes."""
