@@ -6,9 +6,17 @@ from pathlib import Path
 from document_processor.config import settings
 from document_processor.models import Document, StageResult
 
-from classifier_module.rules import ROUTE_TO_TYPE, TYPE_KEYWORDS
+from classifier_module.rules import (
+    FILENAME_PATTERNS,
+    ROUTE_TO_TYPE,
+    TYPE_KEYWORDS,
+    TYPE_KEYWORDS_WEIGHTED,
+    _HIGH_WEIGHT,
+    _LOW_WEIGHT,
+    _MAX_SCORE,
+)
 
-_ALL_TYPES = [t for t, _ in TYPE_KEYWORDS] + list(ROUTE_TO_TYPE.values()) + ["unknown"]
+_ALL_TYPES = [t for t, _, _ in TYPE_KEYWORDS_WEIGHTED] + list(ROUTE_TO_TYPE.values()) + ["unknown"]
 
 # LLM client created once; gracefully absent when ANTHROPIC_API_KEY is not set
 _llm: object = None
@@ -73,17 +81,23 @@ class ClassifierModule:
         text = self._readable_text(document)
 
         if text:
-            doc_type, score = self._keyword_score(text)
-            if score > 0:
-                return doc_type, min(0.44 + score * 0.08, 0.92), "keyword"
+            result = self._weighted_keyword_score(text)
+            if result is not None:
+                doc_type, confidence = result
+                return doc_type, confidence, "keyword"
 
+        # Filename-based matching
         if document.filename:
             stem = Path(document.filename).stem.lower()
+            for doc_type, patterns in FILENAME_PATTERNS:
+                if any(pat in stem for pat in patterns):
+                    return doc_type, 0.55, "filename"
+            # Fallback: any keyword in stem
             for doc_type, keywords in TYPE_KEYWORDS:
                 if any(kw.strip() in stem for kw in keywords):
-                    return doc_type, 0.55, "filename"
+                    return doc_type, 0.45, "filename"
 
-        if route in ("pdf", "word"):
+        if route in ("pdf", "word", "text"):
             return "document", 0.35, "route"
 
         return "unknown", 0.10, "fallback"
@@ -94,13 +108,42 @@ class ClassifierModule:
         except Exception:
             return ""
 
-    def _keyword_score(self, text: str) -> tuple[str, int]:
-        best_type, best_score = "unknown", 0
-        for doc_type, keywords in TYPE_KEYWORDS:
-            score = sum(1 for kw in keywords if kw in text)
-            if score > best_score:
-                best_type, best_score = doc_type, score
-        return best_type, best_score
+    def _weighted_keyword_score(self, text: str) -> tuple[str, float] | None:
+        """Return (doc_type, confidence) using weighted keyword hits, or None if no match."""
+        scores: dict[str, int] = {}
+        for doc_type, high_kws, low_kws in TYPE_KEYWORDS_WEIGHTED:
+            score = (
+                sum(_HIGH_WEIGHT for kw in high_kws if kw in text)
+                + sum(_LOW_WEIGHT for kw in low_kws if kw in text)
+            )
+            if score > 0:
+                scores[doc_type] = score
+
+        if not scores:
+            return None
+
+        # Sort by raw score descending
+        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        best_type, best_score = ranked[0]
+        second_score = ranked[1][1] if len(ranked) > 1 else 0
+
+        max_possible = _MAX_SCORE.get(best_type, 1)
+        # Normalised hit rate: fraction of max possible score achieved
+        hit_rate = min(best_score / max_possible, 1.0)
+
+        # Base confidence from hit rate (scales between 0.45 and 0.92)
+        confidence = 0.45 + hit_rate * 0.47
+
+        # Separation bonus: boost when winner clearly leads runner-up
+        if best_score > 0:
+            separation = (best_score - second_score) / best_score
+            confidence = min(0.95, confidence + separation * 0.12)
+
+        # Penalty when the score is very low (1–2 raw points)
+        if best_score <= _LOW_WEIGHT:
+            confidence *= 0.70
+
+        return best_type, round(confidence, 3)
 
     # ------------------------------------------------------------------
     # LLM fallback
