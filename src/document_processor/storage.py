@@ -83,6 +83,17 @@ _DDL_METADATA = """
         PRIMARY KEY (result_id, key)
     )
 """
+_DDL_BOOKMARKS = """
+    CREATE TABLE IF NOT EXISTS result_bookmarks (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        result_id  TEXT NOT NULL,
+        name       TEXT NOT NULL,
+        reference  TEXT NOT NULL,
+        note       TEXT,
+        created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE (result_id, name)
+    )
+"""
 _DDL_CHECKLIST = """
     CREATE TABLE IF NOT EXISTS result_checklist (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -294,6 +305,7 @@ async def init_db() -> None:
         await db.execute(_DDL_RESULT_LABELS)
         await db.execute(_DDL_REACTIONS)
         await db.execute(_DDL_CHECKLIST)
+        await db.execute(_DDL_BOOKMARKS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -2499,6 +2511,76 @@ async def get_stats_error_rates() -> list[dict]:
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Result bookmarks
+# ---------------------------------------------------------------------------
+
+async def upsert_bookmark(result_id: UUID, name: str, reference: str, note: str | None = None) -> dict:
+    """Create or update a named bookmark. Name is unique per result."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_BOOKMARKS)
+        await db.execute(
+            """INSERT INTO result_bookmarks (result_id, name, reference, note)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(result_id, name) DO UPDATE SET
+                 reference = excluded.reference,
+                 note = excluded.note""",
+            (str(result_id), name, reference, note),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT id, name, reference, note, created_at FROM result_bookmarks "
+            "WHERE result_id = ? AND name = ?",
+            (str(result_id), name),
+        ) as cur:
+            row = await cur.fetchone()
+    return {"id": row[0], "name": row[1], "reference": row[2], "note": row[3], "created_at": row[4]}
+
+
+async def get_bookmarks(result_id: UUID) -> list[dict]:
+    """Return all bookmarks for a result, ordered by name."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_BOOKMARKS)
+        await db.commit()
+        async with db.execute(
+            "SELECT id, name, reference, note, created_at FROM result_bookmarks "
+            "WHERE result_id = ? ORDER BY name ASC",
+            (str(result_id),),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"id": r[0], "name": r[1], "reference": r[2], "note": r[3], "created_at": r[4]} for r in rows]
+
+
+async def get_bookmark(result_id: UUID, name: str) -> dict | None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_BOOKMARKS)
+        await db.commit()
+        async with db.execute(
+            "SELECT id, name, reference, note, created_at FROM result_bookmarks "
+            "WHERE result_id = ? AND name = ?",
+            (str(result_id), name),
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "name": row[1], "reference": row[2], "note": row[3], "created_at": row[4]}
+
+
+async def delete_bookmark(result_id: UUID, name: str) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_BOOKMARKS)
+        cursor = await db.execute(
+            "DELETE FROM result_bookmarks WHERE result_id = ? AND name = ?",
+            (str(result_id), name),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
 
 
 # ---------------------------------------------------------------------------
