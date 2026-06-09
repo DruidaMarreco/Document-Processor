@@ -7,7 +7,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
+import json as _json
+
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from pydantic import BaseModel
@@ -86,6 +88,16 @@ async def _notify_webhooks(event: str, result: PipelineResult) -> None:
     await fire_webhooks(webhooks, event, result)
 
 
+def _parse_config(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = _json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
 @app.post("/process", response_model=PipelineResult, dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
 async def process_document(
@@ -93,6 +105,7 @@ async def process_document(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     dedup: bool = Query(False, description="Return cached result for identical content"),
+    config: str | None = Form(None, description="Optional JSON pipeline config overrides"),
 ):
     content = await file.read()
     if dedup:
@@ -109,7 +122,8 @@ async def process_document(
         content=content,
     )
     pipeline = registry.build_pipeline()
-    result = await pipeline.run(document)
+    seed_ctx = {"_config": _parse_config(config)}
+    result = await pipeline.run(document, context=seed_ctx)
     await storage.save_result(result, document=document)
     event = "document.processed" if result.status != "failed" else "document.failed"
     background_tasks.add_task(_notify_webhooks, event, result)
@@ -118,7 +132,11 @@ async def process_document(
 
 @app.post("/process/stream", dependencies=[Depends(require_api_key)])
 @limiter.limit("30/minute")
-async def process_stream(request: Request, file: UploadFile = File(...)):
+async def process_stream(
+    request: Request,
+    file: UploadFile = File(...),
+    config: str | None = Form(None, description="Optional JSON pipeline config overrides"),
+):
     """Process a single document and stream SSE events for each pipeline stage."""
     content = await file.read()
     document = Document(
@@ -127,6 +145,7 @@ async def process_stream(request: Request, file: UploadFile = File(...)):
         content=content,
     )
     pipeline = registry.build_pipeline()
+    seed_ctx = {"_config": _parse_config(config)}
     stage_queue: asyncio.Queue = asyncio.Queue()
 
     async def _capture(_doc: Document, result) -> None:
@@ -135,7 +154,7 @@ async def process_stream(request: Request, file: UploadFile = File(...)):
     pipeline.add_listener(_capture)
 
     async def generate():
-        task = asyncio.create_task(pipeline.run(document))
+        task = asyncio.create_task(pipeline.run(document, context=seed_ctx))
         n_stages = len(pipeline.stages)
 
         for _ in range(n_stages):

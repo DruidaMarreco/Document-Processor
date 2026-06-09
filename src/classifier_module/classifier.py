@@ -30,13 +30,23 @@ class ClassifierModule:
 
     async def process(self, document: Document, context: dict) -> StageResult:
         t = time.monotonic()
+        cfg: dict = context.get("_config") or {}
         route = context.get("router", {}).get("route", "generic")
+
+        # Per-request forced doc_type skips all classification
+        if cfg.get("force_doc_type"):
+            return StageResult(
+                module=self.name,
+                status="success",
+                data={"type": cfg["force_doc_type"], "confidence": 1.0, "method": "forced"},
+                duration_ms=(time.monotonic() - t) * 1000,
+            )
+
         doc_type, confidence, method = self._classify(document, route)
 
-        if (
-            settings.llm_enabled
-            and confidence < settings.llm_confidence_threshold
-        ):
+        llm_enabled = cfg.get("llm_enabled", settings.llm_enabled)
+        threshold = cfg.get("confidence_threshold", settings.llm_confidence_threshold)
+        if llm_enabled and confidence < threshold:
             doc_type, confidence, method = await self._llm_classify(
                 document, route, doc_type, confidence, method
             )
