@@ -571,6 +571,89 @@ async def get_audit_log(
 
 
 # ---------------------------------------------------------------------------
+# Collections
+# ---------------------------------------------------------------------------
+
+class CollectionCreate(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class CollectionAddBody(BaseModel):
+    ids: list[UUID]
+
+
+@app.post("/collections", status_code=201, dependencies=[Depends(require_api_key)])
+async def create_collection(body: CollectionCreate):
+    """Create a named collection for grouping related results."""
+    return await storage.create_collection(body.name, body.description)
+
+
+@app.get("/collections", dependencies=[Depends(require_api_key)])
+async def list_collections():
+    return await storage.list_collections()
+
+
+@app.get("/collections/{collection_id}", dependencies=[Depends(require_api_key)])
+async def get_collection(collection_id: str):
+    col = await storage.get_collection(collection_id)
+    if not col:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return col
+
+
+@app.delete("/collections/{collection_id}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def delete_collection(collection_id: str):
+    deleted = await storage.delete_collection(collection_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Collection not found")
+
+
+@app.post("/collections/{collection_id}/members", status_code=204,
+          dependencies=[Depends(require_api_key)])
+async def add_to_collection(collection_id: str, body: CollectionAddBody):
+    col = await storage.get_collection(collection_id)
+    if not col:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    if not body.ids:
+        raise HTTPException(status_code=400, detail="ids must not be empty")
+    if len(body.ids) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 ids per request")
+    await storage.add_to_collection(collection_id, body.ids)
+
+
+@app.delete("/collections/{collection_id}/members/{result_id}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def remove_from_collection(collection_id: str, result_id: UUID):
+    col = await storage.get_collection(collection_id)
+    if not col:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    removed = await storage.remove_from_collection(collection_id, result_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Result not in collection")
+
+
+@app.get("/collections/{collection_id}/members", dependencies=[Depends(require_api_key)])
+async def list_collection_members(
+    collection_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    col = await storage.get_collection(collection_id)
+    if not col:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    results, total = await storage.list_collection_results(collection_id, limit=limit, offset=offset)
+    return {
+        "collection_id": collection_id,
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "results": [r.model_dump(mode="json") for r in results],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Admin endpoints
 # ---------------------------------------------------------------------------
 

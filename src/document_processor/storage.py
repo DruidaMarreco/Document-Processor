@@ -58,6 +58,22 @@ _DDL_AUDIT = """
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_COLLECTIONS = """
+    CREATE TABLE IF NOT EXISTS collections (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL,
+        description TEXT,
+        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
+_DDL_COLLECTION_MEMBERS = """
+    CREATE TABLE IF NOT EXISTS collection_members (
+        collection_id TEXT NOT NULL,
+        result_id     TEXT NOT NULL,
+        added_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (collection_id, result_id)
+    )
+"""
 _DDL_WEBHOOKS = """
     CREATE TABLE IF NOT EXISTS webhooks (
         id         TEXT PRIMARY KEY,
@@ -126,6 +142,8 @@ async def init_db() -> None:
         await db.execute(_DDL_TAGS)
         await db.execute(_DDL_NOTES)
         await db.execute(_DDL_AUDIT)
+        await db.execute(_DDL_COLLECTIONS)
+        await db.execute(_DDL_COLLECTION_MEMBERS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -835,6 +853,120 @@ async def is_pinned(result_id: UUID) -> bool | None:
 # ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Collections
+# ---------------------------------------------------------------------------
+
+async def create_collection(name: str, description: str | None = None) -> dict:
+    from uuid import uuid4 as _uuid4
+    col_id = str(_uuid4())
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_COLLECTIONS)
+        await db.execute(
+            "INSERT INTO collections (id, name, description) VALUES (?, ?, ?)",
+            (col_id, name, description),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT id, name, description, created_at FROM collections WHERE id = ?", (col_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    return {"id": row[0], "name": row[1], "description": row[2], "created_at": row[3]}
+
+
+async def get_collection(collection_id: str) -> dict | None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_COLLECTIONS)
+        await db.commit()
+        async with db.execute(
+            "SELECT id, name, description, created_at FROM collections WHERE id = ?",
+            (collection_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return {"id": row[0], "name": row[1], "description": row[2], "created_at": row[3]} if row else None
+
+
+async def list_collections() -> list[dict]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_COLLECTIONS)
+        await db.commit()
+        async with db.execute(
+            "SELECT id, name, description, created_at FROM collections ORDER BY created_at DESC"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"id": r[0], "name": r[1], "description": r[2], "created_at": r[3]} for r in rows]
+
+
+async def delete_collection(collection_id: str) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_COLLECTIONS)
+        await db.execute(_DDL_COLLECTION_MEMBERS)
+        await db.execute("DELETE FROM collection_members WHERE collection_id = ?", (collection_id,))
+        cursor = await db.execute("DELETE FROM collections WHERE id = ?", (collection_id,))
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def add_to_collection(collection_id: str, result_ids: list[UUID]) -> int:
+    """Add results to a collection. Returns count of rows actually inserted."""
+    if not result_ids:
+        return 0
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.execute(_DDL_COLLECTIONS)
+        await db.execute(_DDL_COLLECTION_MEMBERS)
+        await db.commit()
+        inserted = 0
+        for rid in result_ids:
+            cursor = await db.execute(
+                "INSERT OR IGNORE INTO collection_members (collection_id, result_id) VALUES (?, ?)",
+                (collection_id, str(rid)),
+            )
+            inserted += cursor.rowcount or 0
+        await db.commit()
+    return inserted
+
+
+async def remove_from_collection(collection_id: str, result_id: UUID) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_COLLECTION_MEMBERS)
+        cursor = await db.execute(
+            "DELETE FROM collection_members WHERE collection_id = ? AND result_id = ?",
+            (collection_id, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def list_collection_results(
+    collection_id: str, limit: int = 50, offset: int = 0
+) -> tuple[list[PipelineResult], int]:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.execute(_DDL_COLLECTION_MEMBERS)
+        await db.commit()
+        async with db.execute(
+            "SELECT COUNT(*) FROM collection_members WHERE collection_id = ?", (collection_id,)
+        ) as cur:
+            total: int = (await cur.fetchone())[0]  # type: ignore[index]
+        async with db.execute(
+            """SELECT r.data FROM results r
+               JOIN collection_members cm ON cm.result_id = r.id
+               WHERE cm.collection_id = ?
+               ORDER BY cm.added_at DESC LIMIT ? OFFSET ?""",
+            (collection_id, limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [PipelineResult.model_validate_json(r[0]) for r in rows], total
+
 
 async def append_audit(result_id: UUID | str, action: str, detail: str | None = None) -> None:
     _ensure_dir()
