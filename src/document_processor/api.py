@@ -1368,3 +1368,34 @@ async def delete_api_key(prefix: str):
     deleted = await storage.delete_api_key_by_prefix(prefix)
     if not deleted:
         raise HTTPException(status_code=404, detail="API key not found")
+
+
+class QuotaBody(BaseModel):
+    daily_limit: int = Field(..., ge=1, description="Maximum documents processed per day")
+
+
+@app.get("/api-keys/{prefix}/quota")
+async def get_api_key_quota(prefix: str):
+    """Return quota info (daily limit, used today, remaining) for an API key prefix."""
+    quota = await storage.get_api_key_quota(prefix)
+    if quota is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    return quota
+
+
+@app.put("/api-keys/{prefix}/quota", status_code=204)
+async def set_api_key_quota(prefix: str, body: QuotaBody):
+    """Set or update the daily document-processing limit for an API key prefix."""
+    existing = await storage.get_api_key_quota(prefix)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    await storage.set_api_key_quota(prefix, body.daily_limit)
+
+
+@app.delete("/api-keys/{prefix}/quota", status_code=204)
+async def delete_api_key_quota(prefix: str):
+    """Remove the daily limit for an API key prefix."""
+    existing = await storage.get_api_key_quota(prefix)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    await storage.delete_api_key_quota(prefix)

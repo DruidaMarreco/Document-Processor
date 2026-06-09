@@ -169,6 +169,13 @@ _DDL_API_KEYS = """
         created_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_API_KEY_QUOTAS = """
+    CREATE TABLE IF NOT EXISTS api_key_quotas (
+        prefix      TEXT PRIMARY KEY,
+        daily_limit INTEGER NOT NULL,
+        updated_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    )
+"""
 _DDL_JOBS = """
     CREATE TABLE IF NOT EXISTS jobs (
         job_id       TEXT PRIMARY KEY,
@@ -232,6 +239,7 @@ async def init_db() -> None:
         await db.execute(_DDL_METADATA)
         await db.execute(_DDL_SNAPSHOTS)
         await db.execute(_DDL_RELATIONS)
+        await db.execute(_DDL_API_KEY_QUOTAS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -836,6 +844,69 @@ async def delete_api_key_by_prefix(prefix: str) -> bool:
         await db.execute(_DDL_API_KEYS)
         cursor = await db.execute(
             "DELETE FROM api_keys WHERE prefix = ?", (prefix,)
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def set_api_key_quota(prefix: str, daily_limit: int) -> None:
+    """Upsert a daily document-processing limit for an API key prefix."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_API_KEY_QUOTAS)
+        await db.execute(
+            """INSERT INTO api_key_quotas (prefix, daily_limit, updated_at)
+               VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(prefix) DO UPDATE SET
+                 daily_limit = excluded.daily_limit,
+                 updated_at  = excluded.updated_at""",
+            (prefix, daily_limit),
+        )
+        await db.commit()
+
+
+async def get_api_key_quota(prefix: str) -> dict | None:
+    """Return quota info for a prefix, or None if the prefix doesn't exist as an API key."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_API_KEYS)
+        await db.execute(_DDL_API_KEY_QUOTAS)
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        # Verify the prefix actually exists
+        async with db.execute(
+            "SELECT prefix, name FROM api_keys WHERE prefix = ?", (prefix,)
+        ) as cur:
+            key_row = await cur.fetchone()
+        if not key_row:
+            return None
+        # Get limit if set
+        async with db.execute(
+            "SELECT daily_limit FROM api_key_quotas WHERE prefix = ?", (prefix,)
+        ) as cur:
+            quota_row = await cur.fetchone()
+        daily_limit: int | None = quota_row[0] if quota_row else None
+        # Count results created today
+        async with db.execute(
+            "SELECT COUNT(*) FROM results WHERE created_at >= strftime('%Y-%m-%dT00:00:00Z', 'now')"
+        ) as cur:
+            used_today: int = (await cur.fetchone())[0]  # type: ignore[index]
+    remaining: int | None = max(0, daily_limit - used_today) if daily_limit is not None else None
+    return {
+        "prefix": prefix,
+        "daily_limit": daily_limit,
+        "used_today": used_today,
+        "remaining": remaining,
+    }
+
+
+async def delete_api_key_quota(prefix: str) -> bool:
+    """Remove the daily limit for an API key prefix. Returns False if no limit was set."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_API_KEY_QUOTAS)
+        cursor = await db.execute(
+            "DELETE FROM api_key_quotas WHERE prefix = ?", (prefix,)
         )
         await db.commit()
     return (cursor.rowcount or 0) > 0
