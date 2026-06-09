@@ -28,7 +28,8 @@ _DDL_RESULTS = """
         locked          INTEGER NOT NULL DEFAULT 0,
         starred         INTEGER NOT NULL DEFAULT 0,
         priority        TEXT,
-        expires_at      TEXT
+        expires_at      TEXT,
+        rating          INTEGER
     )
 """
 _DDL_DOCUMENTS = """
@@ -275,6 +276,7 @@ _MIGRATION_COLUMNS = [
     ("starred",          "INTEGER NOT NULL DEFAULT 0"),
     ("priority",         "TEXT"),
     ("expires_at",       "TEXT"),
+    ("rating",           "INTEGER"),
 ]
 
 WORKFLOW_STATUSES = {"pending_review", "approved", "rejected", "archived"}
@@ -1444,6 +1446,48 @@ async def get_result_priority(result_id: UUID) -> str | None:
     if row is None:
         return None
     return row[0]
+
+
+# ---------------------------------------------------------------------------
+# Result rating (1–5)
+# ---------------------------------------------------------------------------
+
+async def set_result_rating(result_id: UUID, rating: int) -> bool:
+    """Set a 1–5 rating. Returns False if result not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        cursor = await db.execute(
+            "UPDATE results SET rating = ? WHERE id = ?", (rating, str(result_id))
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def get_result_rating(result_id: UUID) -> int | None:
+    """Return rating, or None if unset or result not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        row = await (
+            await db.execute("SELECT rating FROM results WHERE id = ?", (str(result_id),))
+        ).fetchone()
+    if row is None:
+        return None
+    return row[0]
+
+
+async def delete_result_rating(result_id: UUID) -> bool:
+    """Clear the rating. Returns False if result not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        cursor = await db.execute(
+            "UPDATE results SET rating = NULL WHERE id = ?", (str(result_id),)
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
 
 
 # ---------------------------------------------------------------------------
