@@ -51,6 +51,16 @@ _DDL_NOTES = """
         updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_RELATIONS = """
+    CREATE TABLE IF NOT EXISTS result_relations (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_id   TEXT NOT NULL,
+        target_id   TEXT NOT NULL,
+        relation    TEXT NOT NULL,
+        created_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        UNIQUE (source_id, target_id, relation)
+    )
+"""
 _DDL_METADATA = """
     CREATE TABLE IF NOT EXISTS result_metadata (
         result_id  TEXT NOT NULL,
@@ -209,6 +219,7 @@ async def init_db() -> None:
         await db.execute(_DDL_WEBHOOK_DELIVERIES)
         await db.execute(_DDL_COMMENTS)
         await db.execute(_DDL_METADATA)
+        await db.execute(_DDL_RELATIONS)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -1849,3 +1860,69 @@ async def get_stats_error_rates() -> list[dict]:
         }
         for r in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# Result relations
+# ---------------------------------------------------------------------------
+
+RELATION_TYPES = {"related_to", "duplicate_of", "supersedes", "attachment_of"}
+
+
+async def add_relation(source_id: UUID, target_id: UUID, relation: str) -> dict | None:
+    """Add a typed relation. Returns the created entry, or None if it already exists."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RELATIONS)
+        try:
+            cursor = await db.execute(
+                "INSERT INTO result_relations (source_id, target_id, relation) VALUES (?, ?, ?)",
+                (str(source_id), str(target_id), relation),
+            )
+            row_id = cursor.lastrowid
+            await db.commit()
+        except Exception:
+            return None  # UNIQUE constraint violated
+        async with db.execute(
+            "SELECT id, source_id, target_id, relation, created_at FROM result_relations WHERE id = ?",
+            (row_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return {"id": row[0], "source_id": row[1], "target_id": row[2],
+            "relation": row[3], "created_at": row[4]}
+
+
+async def get_relations(result_id: UUID) -> list[dict]:
+    """Return all relations where result_id is source or target."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RELATIONS)
+        await db.commit()
+        async with db.execute(
+            """SELECT id, source_id, target_id, relation, created_at
+               FROM result_relations
+               WHERE source_id = ? OR target_id = ?
+               ORDER BY id ASC""",
+            (str(result_id), str(result_id)),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {"id": r[0], "source_id": r[1], "target_id": r[2],
+         "relation": r[3], "created_at": r[4]}
+        for r in rows
+    ]
+
+
+async def delete_relation(result_id: UUID, relation_id: int) -> bool:
+    """Delete a relation that involves result_id (as source or target)."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RELATIONS)
+        cursor = await db.execute(
+            "DELETE FROM result_relations WHERE id = ? AND (source_id = ? OR target_id = ?)",
+            (relation_id, str(result_id), str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0

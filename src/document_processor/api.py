@@ -900,6 +900,56 @@ async def delete_metadata_key(document_id: UUID, key: str):
 
 
 # ---------------------------------------------------------------------------
+# Result relations
+# ---------------------------------------------------------------------------
+
+class RelationBody(BaseModel):
+    target_id: UUID
+    relation: str
+
+
+@app.post("/results/{document_id}/relations", status_code=201,
+          dependencies=[Depends(require_api_key)])
+async def add_relation(document_id: UUID, body: RelationBody):
+    """Create a typed link between two results."""
+    if body.relation not in storage.RELATION_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid relation. Allowed: {sorted(storage.RELATION_TYPES)}",
+        )
+    if not await storage.get_result(document_id):
+        raise HTTPException(status_code=404, detail="Source result not found")
+    if not await storage.get_result(body.target_id):
+        raise HTTPException(status_code=404, detail="Target result not found")
+    entry = await storage.add_relation(document_id, body.target_id, body.relation)
+    if entry is None:
+        raise HTTPException(status_code=409, detail="Relation already exists")
+    await storage.append_audit(document_id, "relation_added",
+                               f"relation={body.relation} target={body.target_id}")
+    return entry
+
+
+@app.get("/results/{document_id}/relations", dependencies=[Depends(require_api_key)])
+async def list_relations(document_id: UUID):
+    """Return all relations where this result is source or target."""
+    if not await storage.get_result(document_id):
+        raise HTTPException(status_code=404, detail="Result not found")
+    relations = await storage.get_relations(document_id)
+    return {"document_id": str(document_id), "relations": relations}
+
+
+@app.delete("/results/{document_id}/relations/{relation_id}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def delete_relation(document_id: UUID, relation_id: int):
+    if not await storage.get_result(document_id):
+        raise HTTPException(status_code=404, detail="Result not found")
+    removed = await storage.delete_relation(document_id, relation_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Relation not found")
+    await storage.append_audit(document_id, "relation_deleted", f"id={relation_id}")
+
+
+# ---------------------------------------------------------------------------
 # Pin / unpin endpoints
 # ---------------------------------------------------------------------------
 
