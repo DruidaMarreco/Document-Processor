@@ -51,6 +51,15 @@ _DDL_NOTES = """
         updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     )
 """
+_DDL_METADATA = """
+    CREATE TABLE IF NOT EXISTS result_metadata (
+        result_id  TEXT NOT NULL,
+        key        TEXT NOT NULL,
+        value      TEXT NOT NULL,
+        updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        PRIMARY KEY (result_id, key)
+    )
+"""
 _DDL_COMMENTS = """
     CREATE TABLE IF NOT EXISTS result_comments (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -199,6 +208,7 @@ async def init_db() -> None:
         await db.execute(_DDL_COLLECTION_MEMBERS)
         await db.execute(_DDL_WEBHOOK_DELIVERIES)
         await db.execute(_DDL_COMMENTS)
+        await db.execute(_DDL_METADATA)
         # Add columns that may not exist in older databases
         for col, col_type in _MIGRATION_COLUMNS:
             try:
@@ -1673,3 +1683,67 @@ async def get_workflow_status(result_id: UUID) -> str | None:
     if row is None:
         return None
     return row[0]  # may be None if column is NULL
+
+
+# ---------------------------------------------------------------------------
+# Custom key-value metadata
+# ---------------------------------------------------------------------------
+
+async def set_metadata(result_id: UUID, key: str, value: object) -> None:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_METADATA)
+        await db.execute(
+            """INSERT INTO result_metadata (result_id, key, value, updated_at)
+               VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(result_id, key) DO UPDATE SET
+                 value = excluded.value,
+                 updated_at = excluded.updated_at""",
+            (str(result_id), key, json.dumps(value)),
+        )
+        await db.commit()
+
+
+async def get_metadata(result_id: UUID) -> dict:
+    """Return all key-value metadata for a result as a dict."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_METADATA)
+        await db.commit()
+        async with db.execute(
+            "SELECT key, value, updated_at FROM result_metadata WHERE result_id = ? ORDER BY key",
+            (str(result_id),),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {
+        r[0]: {"value": json.loads(r[1]), "updated_at": r[2]}
+        for r in rows
+    }
+
+
+async def get_metadata_key(result_id: UUID, key: str) -> dict | None:
+    """Return a single metadata entry or None if not found."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_METADATA)
+        await db.commit()
+        async with db.execute(
+            "SELECT value, updated_at FROM result_metadata WHERE result_id = ? AND key = ?",
+            (str(result_id), key),
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    return {"key": key, "value": json.loads(row[0]), "updated_at": row[1]}
+
+
+async def delete_metadata_key(result_id: UUID, key: str) -> bool:
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_METADATA)
+        cursor = await db.execute(
+            "DELETE FROM result_metadata WHERE result_id = ? AND key = ?",
+            (str(result_id), key),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0

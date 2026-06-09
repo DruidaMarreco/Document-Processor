@@ -808,6 +808,60 @@ async def delete_comment(document_id: UUID, comment_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Custom key-value metadata
+# ---------------------------------------------------------------------------
+
+class MetadataValueBody(BaseModel):
+    value: object
+
+
+@app.put("/results/{document_id}/metadata/{key}", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def set_metadata(document_id: UUID, key: str, body: MetadataValueBody):
+    """Set a metadata key to any JSON-serialisable value."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.set_metadata(document_id, key, body.value)
+    await storage.append_audit(document_id, "metadata_set", f"key={key}")
+
+
+@app.get("/results/{document_id}/metadata", dependencies=[Depends(require_api_key)])
+async def get_metadata(document_id: UUID):
+    """Return all custom metadata key-value pairs for a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    meta = await storage.get_metadata(document_id)
+    return {"document_id": str(document_id), "metadata": meta}
+
+
+@app.get("/results/{document_id}/metadata/{key}", dependencies=[Depends(require_api_key)])
+async def get_metadata_key(document_id: UUID, key: str):
+    """Return a single metadata entry."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    entry = await storage.get_metadata_key(document_id, key)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Metadata key not found")
+    return entry
+
+
+@app.delete("/results/{document_id}/metadata/{key}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def delete_metadata_key(document_id: UUID, key: str):
+    """Delete a single metadata key."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    removed = await storage.delete_metadata_key(document_id, key)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Metadata key not found")
+    await storage.append_audit(document_id, "metadata_deleted", f"key={key}")
+
+
+# ---------------------------------------------------------------------------
 # Pin / unpin endpoints
 # ---------------------------------------------------------------------------
 
