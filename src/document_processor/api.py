@@ -125,6 +125,8 @@ async def process_document(
     seed_ctx = {"_config": _parse_config(config)}
     result = await pipeline.run(document, context=seed_ctx)
     await storage.save_result(result, document=document)
+    await storage.append_audit(result.document_id, "processed",
+                               f"status={result.status} filename={file.filename}")
     event = "document.processed" if result.status != "failed" else "document.failed"
     background_tasks.add_task(_notify_webhooks, event, result)
     return result
@@ -295,6 +297,7 @@ async def reprocess_document(document_id: UUID, background_tasks: BackgroundTask
     pipeline = registry.build_pipeline()
     result = await pipeline.run(document)
     await storage.save_result(result, document=document)
+    await storage.append_audit(document_id, "reprocessed", f"status={result.status}")
     background_tasks.add_task(_notify_webhooks, "document.reprocessed", result)
     return result
 
@@ -314,6 +317,7 @@ async def delete_result(document_id: UUID):
     result = await storage.get_result(document_id)
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
+    await storage.append_audit(document_id, "deleted")
     await storage.delete_result(document_id)
 
 
@@ -369,6 +373,7 @@ async def add_tags(document_id: UUID, body: TagsBody):
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
     await storage.add_tags(document_id, body.tags)
+    await storage.append_audit(document_id, "tags_added", f"tags={body.tags}")
 
 
 @app.get("/results/{document_id}/tags", dependencies=[Depends(require_api_key)])
@@ -485,6 +490,7 @@ async def set_note(document_id: UUID, body: NoteBody):
     if not result:
         raise HTTPException(status_code=404, detail="Result not found")
     await storage.set_note(document_id, body.note)
+    await storage.append_audit(document_id, "note_set")
 
 
 @app.get("/results/{document_id}/note", dependencies=[Depends(require_api_key)])
@@ -507,6 +513,23 @@ async def delete_note(document_id: UUID):
     removed = await storage.delete_note(document_id)
     if not removed:
         raise HTTPException(status_code=404, detail="No note set for this result")
+
+
+# ---------------------------------------------------------------------------
+# Audit log endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/results/{document_id}/audit", dependencies=[Depends(require_api_key)])
+async def get_audit_log(
+    document_id: UUID,
+    limit: int = Query(100, ge=1, le=500),
+):
+    """Return the immutable audit log for a result (oldest first)."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    entries = await storage.get_audit_log(document_id, limit=limit)
+    return {"document_id": str(document_id), "entries": entries}
 
 
 # ---------------------------------------------------------------------------
