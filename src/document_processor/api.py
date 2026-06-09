@@ -1436,6 +1436,57 @@ async def get_audit_log(
 
 
 # ---------------------------------------------------------------------------
+# Reaction endpoints
+# ---------------------------------------------------------------------------
+
+class ReactionBody(BaseModel):
+    emoji: str = Field(..., description="Reaction emoji key: +1, -1, eyes, check, red_circle")
+
+
+@app.post("/results/{document_id}/reactions", status_code=200,
+          dependencies=[Depends(require_api_key)])
+async def add_reaction(document_id: UUID, body: ReactionBody):
+    """Increment a reaction counter on a result. Returns updated counts."""
+    if body.emoji not in storage.ALLOWED_REACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid emoji. Allowed: {', '.join(sorted(storage.ALLOWED_REACTIONS))}",
+        )
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    counts = await storage.add_reaction(document_id, body.emoji)
+    await storage.append_audit(document_id, "reaction_added", f"emoji={body.emoji}")
+    return {"document_id": str(document_id), "reactions": counts}
+
+
+@app.delete("/results/{document_id}/reactions/{emoji}", status_code=200,
+            dependencies=[Depends(require_api_key)])
+async def remove_reaction(document_id: UUID, emoji: str):
+    """Decrement a reaction counter (minimum 0). Returns updated counts."""
+    if emoji not in storage.ALLOWED_REACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid emoji. Allowed: {', '.join(sorted(storage.ALLOWED_REACTIONS))}",
+        )
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    counts = await storage.remove_reaction(document_id, emoji)
+    return {"document_id": str(document_id), "reactions": counts}
+
+
+@app.get("/results/{document_id}/reactions", dependencies=[Depends(require_api_key)])
+async def get_reactions(document_id: UUID):
+    """Return all reaction counts for a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    counts = await storage.get_reactions(document_id)
+    return {"document_id": str(document_id), "reactions": counts}
+
+
+# ---------------------------------------------------------------------------
 # Access log endpoints
 # ---------------------------------------------------------------------------
 
