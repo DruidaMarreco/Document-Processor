@@ -686,6 +686,59 @@ async def delete_note(document_id: UUID):
 
 
 # ---------------------------------------------------------------------------
+# Result comments
+# ---------------------------------------------------------------------------
+
+class CommentBody(BaseModel):
+    text: str
+
+
+@app.post("/results/{document_id}/comments", status_code=201,
+          dependencies=[Depends(require_api_key)])
+async def add_comment(document_id: UUID, body: CommentBody):
+    """Add a comment to a result. Multiple comments are allowed per result."""
+    if not body.text.strip():
+        raise HTTPException(status_code=400, detail="text must not be empty")
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    comment = await storage.add_comment(document_id, body.text.strip())
+    await storage.append_audit(document_id, "comment_added", f"id={comment['id']}")
+    return comment
+
+
+@app.get("/results/{document_id}/comments", dependencies=[Depends(require_api_key)])
+async def list_comments(
+    document_id: UUID,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    comments, total = await storage.get_comments(document_id, limit=limit, offset=offset)
+    return {
+        "document_id": str(document_id),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "comments": comments,
+    }
+
+
+@app.delete("/results/{document_id}/comments/{comment_id}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def delete_comment(document_id: UUID, comment_id: int):
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    removed = await storage.delete_comment(document_id, comment_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Comment not found")
+    await storage.append_audit(document_id, "comment_deleted", f"id={comment_id}")
+
+
+# ---------------------------------------------------------------------------
 # Pin / unpin endpoints
 # ---------------------------------------------------------------------------
 
