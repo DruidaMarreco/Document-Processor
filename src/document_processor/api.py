@@ -284,6 +284,7 @@ async def list_results(
     status: str | None = Query(None, description="Filter by pipeline status (success, partial, failed)"),
     filename: str | None = Query(None, description="Partial filename match"),
     tag: str | None = Query(None, description="Filter by tag (exact, case-insensitive)"),
+    label: str | None = Query(None, description="Filter by label name (exact match)"),
     q: str | None = Query(None, description="Keyword search within extracted content"),
     date_from: str | None = Query(None, description="ISO 8601 lower bound for created_at (inclusive)"),
     date_to: str | None = Query(None, description="ISO 8601 upper bound for created_at (inclusive)"),
@@ -299,6 +300,8 @@ async def list_results(
 ):
     if tag:
         results, total = await storage.search_results_by_tag(tag=tag, limit=limit, offset=offset)
+    elif label:
+        results, total = await storage.search_results_by_label(label_name=label, limit=limit, offset=offset)
     else:
         results, total = await storage.search_results(
             doc_type=doc_type, status=status, filename=filename,
@@ -730,6 +733,89 @@ async def remove_tag(document_id: UUID, tag: str):
     removed = await storage.remove_tag(document_id, tag)
     if not removed:
         raise HTTPException(status_code=404, detail="Tag not found")
+
+
+# ---------------------------------------------------------------------------
+# Label registry + per-result label endpoints
+# ---------------------------------------------------------------------------
+
+class LabelCreateBody(BaseModel):
+    name: str = Field(..., min_length=1, max_length=50)
+    color: str = Field("#888888", description="Hex colour string e.g. #ff0000")
+    description: str | None = None
+
+
+class ApplyLabelBody(BaseModel):
+    label: str = Field(..., description="Label name to apply")
+
+
+@app.post("/labels", status_code=201, dependencies=[Depends(require_api_key)])
+async def create_label(body: LabelCreateBody):
+    """Create a label in the label registry."""
+    existing = await storage.get_label(body.name)
+    if existing:
+        raise HTTPException(status_code=409, detail="Label already exists")
+    return await storage.create_label(body.name, body.color, body.description)
+
+
+@app.get("/labels", dependencies=[Depends(require_api_key)])
+async def list_labels():
+    """List all labels in the registry."""
+    return {"labels": await storage.list_labels()}
+
+
+@app.get("/labels/{name}", dependencies=[Depends(require_api_key)])
+async def get_label(name: str):
+    """Retrieve a single label by name."""
+    label = await storage.get_label(name)
+    if not label:
+        raise HTTPException(status_code=404, detail="Label not found")
+    return label
+
+
+@app.delete("/labels/{name}", status_code=204, dependencies=[Depends(require_api_key)])
+async def delete_label(name: str):
+    """Delete a label and remove it from all results."""
+    deleted = await storage.delete_label(name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Label not found")
+
+
+@app.post("/results/{document_id}/labels", status_code=204,
+          dependencies=[Depends(require_api_key)])
+async def apply_label_to_result(document_id: UUID, body: ApplyLabelBody):
+    """Apply a label to a result (idempotent). Label must exist in the registry."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    label = await storage.get_label(body.label)
+    if not label:
+        raise HTTPException(status_code=404, detail="Label not found")
+    await storage.apply_label(document_id, body.label)
+    await storage.append_audit(document_id, "label_applied", f"label={body.label}")
+
+
+@app.delete("/results/{document_id}/labels/{label_name}", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def remove_label_from_result(document_id: UUID, label_name: str):
+    """Remove a label from a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    removed = await storage.remove_label_from_result(document_id, label_name)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Label not assigned to this result")
+    await storage.append_audit(document_id, "label_removed", f"label={label_name}")
+
+
+@app.get("/results/{document_id}/labels", dependencies=[Depends(require_api_key)])
+async def get_result_labels(document_id: UUID):
+    """List all labels applied to a result."""
+    result = await storage.get_result(document_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Result not found")
+    labels = await storage.get_result_labels(document_id)
+    return {"document_id": str(document_id), "labels": labels}
 
 
 # ---------------------------------------------------------------------------
