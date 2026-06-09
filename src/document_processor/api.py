@@ -269,6 +269,12 @@ async def results_stats_tags():
     return {"tags": await storage.get_tag_stats()}
 
 
+@app.get("/results/stats/summary", dependencies=[Depends(require_api_key)])
+async def results_stats_summary():
+    """Rich aggregate dashboard: flags, priority/workflow breakdown, top tags/labels, time windows."""
+    return await storage.get_processing_summary()
+
+
 @app.get("/results/tags", dependencies=[Depends(require_api_key)])
 async def list_all_tags(
     q: str | None = Query(None, description="Prefix filter for tag autocomplete"),
