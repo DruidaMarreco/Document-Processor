@@ -237,6 +237,7 @@ async def list_results(
     q: str | None = Query(None, description="Keyword search within extracted content"),
     date_from: str | None = Query(None, description="ISO 8601 lower bound for created_at (inclusive)"),
     date_to: str | None = Query(None, description="ISO 8601 upper bound for created_at (inclusive)"),
+    pinned: bool | None = Query(None, description="Filter by pin state (true=pinned only, false=unpinned only)"),
     sort_by: str = Query("created_at", description="Sort field: created_at, doc_type, filename, pipeline_status"),
     sort_order: str = Query("desc", description="Sort direction: asc or desc"),
     limit: int = Query(50, ge=1, le=200),
@@ -248,6 +249,7 @@ async def list_results(
         results, total = await storage.search_results(
             doc_type=doc_type, status=status, filename=filename,
             q=q, date_from=date_from, date_to=date_to,
+            pinned=pinned,
             sort_by=sort_by, sort_order=sort_order,
             limit=limit, offset=offset,
         )
@@ -513,6 +515,42 @@ async def delete_note(document_id: UUID):
     removed = await storage.delete_note(document_id)
     if not removed:
         raise HTTPException(status_code=404, detail="No note set for this result")
+
+
+# ---------------------------------------------------------------------------
+# Pin / unpin endpoints
+# ---------------------------------------------------------------------------
+
+@app.put("/results/{document_id}/pin", status_code=204,
+         dependencies=[Depends(require_api_key)])
+async def pin_result(document_id: UUID):
+    """Pin a result so it is excluded from retention cleanup."""
+    updated = await storage.set_pinned(document_id, True)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Result not found")
+    await storage.append_audit(document_id, "pinned")
+
+
+@app.delete("/results/{document_id}/pin", status_code=204,
+            dependencies=[Depends(require_api_key)])
+async def unpin_result(document_id: UUID):
+    """Unpin a previously pinned result."""
+    state = await storage.is_pinned(document_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    if not state:
+        raise HTTPException(status_code=409, detail="Result is not pinned")
+    await storage.set_pinned(document_id, False)
+    await storage.append_audit(document_id, "unpinned")
+
+
+@app.get("/results/{document_id}/pin", dependencies=[Depends(require_api_key)])
+async def get_pin_state(document_id: UUID):
+    """Return the pin state of a result."""
+    state = await storage.is_pinned(document_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Result not found")
+    return {"pinned": state}
 
 
 # ---------------------------------------------------------------------------

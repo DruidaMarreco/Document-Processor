@@ -21,7 +21,8 @@ _DDL_RESULTS = """
         pipeline_status TEXT,
         filename        TEXT,
         data            TEXT NOT NULL,
-        created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        pinned          INTEGER NOT NULL DEFAULT 0
     )
 """
 _DDL_DOCUMENTS = """
@@ -93,6 +94,7 @@ _MIGRATION_COLUMNS = [
     ("doc_type",        "TEXT"),
     ("pipeline_status", "TEXT"),
     ("filename",        "TEXT"),
+    ("pinned",          "INTEGER NOT NULL DEFAULT 0"),
 ]
 _MIGRATION_DOCUMENTS_COLUMNS = [
     ("content_hash", "TEXT"),
@@ -235,6 +237,7 @@ async def search_results(
     q: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    pinned: bool | None = None,
     sort_by: str = "created_at",
     sort_order: str = "desc",
     limit: int = 50,
@@ -261,6 +264,9 @@ async def search_results(
     if date_to:
         conditions.append("created_at <= ?")
         params.append(date_to)
+    if pinned is not None:
+        conditions.append("pinned = ?")
+        params.append(1 if pinned else 0)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     col = sort_by if sort_by in _SORT_COLUMNS else "created_at"
@@ -741,6 +747,7 @@ async def cleanup_old_results(older_than_days: int) -> int:
         cutoff = f"datetime('now', '-{int(older_than_days)} days')"
         async with db.execute(
             f"SELECT id FROM results WHERE created_at < strftime('%Y-%m-%dT%H:%M:%SZ', {cutoff})"
+            " AND pinned = 0"
         ) as cur:
             ids = [r[0] for r in await cur.fetchall()]
         if not ids:
@@ -793,6 +800,36 @@ async def delete_note(result_id: UUID) -> bool:
         )
         await db.commit()
     return (cursor.rowcount or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Result pinning
+# ---------------------------------------------------------------------------
+
+async def set_pinned(result_id: UUID, pinned: bool) -> bool:
+    """Pin or unpin a result. Returns False if the result does not exist."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        cursor = await db.execute(
+            "UPDATE results SET pinned = ? WHERE id = ?",
+            (1 if pinned else 0, str(result_id)),
+        )
+        await db.commit()
+    return (cursor.rowcount or 0) > 0
+
+
+async def is_pinned(result_id: UUID) -> bool | None:
+    """Return pin state, or None if result does not exist."""
+    _ensure_dir()
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(_DDL_RESULTS)
+        await db.commit()
+        async with db.execute(
+            "SELECT pinned FROM results WHERE id = ?", (str(result_id),)
+        ) as cur:
+            row = await cur.fetchone()
+    return bool(row[0]) if row is not None else None
 
 
 # ---------------------------------------------------------------------------
