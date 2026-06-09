@@ -275,6 +275,43 @@ async def results_stats_summary():
     return await storage.get_processing_summary()
 
 
+@app.get("/results/search", dependencies=[Depends(require_api_key)])
+async def fts_search_results(
+    q: str = Query(..., min_length=1, description="Full-text search query"),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+):
+    """Full-text search across filenames, document types, and extracted content.
+
+    Uses SQLite FTS5 (BM25 ranking). Results are returned as lightweight summaries
+    ordered by relevance.
+    """
+    try:
+        result_ids = await storage.fts_search(q, limit=limit, offset=offset)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid search query")
+    items = []
+    for rid in result_ids:
+        from uuid import UUID as _UUID
+        r = await storage.get_result(_UUID(rid))
+        if r:
+            doc_type = next(
+                (s.data.get("type") for s in r.stages if s.module == "classifier"), None
+            )
+            filename = next(
+                (s.data.get("metadata", {}).get("filename") for s in r.stages if s.module == "extractor"),
+                None,
+            )
+            items.append({
+                "document_id": rid,
+                "doc_type": doc_type,
+                "status": r.status,
+                "filename": filename,
+                "completed_at": r.completed_at.isoformat(),
+            })
+    return {"query": q, "total": len(items), "results": items}
+
+
 @app.get("/results/tags", dependencies=[Depends(require_api_key)])
 async def list_all_tags(
     q: str | None = Query(None, description="Prefix filter for tag autocomplete"),
